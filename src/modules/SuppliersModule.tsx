@@ -281,8 +281,8 @@ export const SuppliersModule: React.FC = () => {
       {/* Action & Filter Toolbar (Exact layout & color hierarchy tailored for Suppliers) */}
       <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
         {/* Start (Right in RTL): Search box + 3 Status Filters (الكل / لهم مستحقات / حساب مصفى) */}
-        <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
-          <div className="relative flex-1 min-w-[210px] max-w-sm">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:flex-1 sm:min-w-0">
+          <div className="relative w-full sm:flex-1 sm:min-w-[200px] sm:max-w-sm">
             <Search className="pointer-events-none absolute top-1/2 -translate-y-1/2 start-3 h-4 w-4 text-sky-700" />
             <input
               type="text"
@@ -509,7 +509,7 @@ export const SuppliersModule: React.FC = () => {
 
               {/* Crisp empty ledger rows matching the blueprint sheet */}
               {Array.from({ length: emptyFillerCount }).map((_, idx) => (
-                <tr key={`empty-sup-${idx}`} className="h-9">
+                <tr key={`empty-sup-${idx}`} className={`h-9 ${idx >= 3 ? 'hidden sm:table-row' : ''}`}>
                   <td className="border border-slate-800/60" />
                   <td className="border border-slate-800/60" />
                   <td className="border border-slate-800/60" />
@@ -543,8 +543,8 @@ export const SuppliersModule: React.FC = () => {
 
       {/* Add/Edit Modal */}
       {showForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-3 sm:p-4 overflow-y-auto">
+          <div className="w-full max-w-lg max-h-[92dvh] overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 sm:p-6 shadow-xl my-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-base font-bold text-slate-900">
                 {editing

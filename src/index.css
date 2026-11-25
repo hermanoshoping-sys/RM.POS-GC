@@ -15,9 +15,52 @@
     font-family: var(--font-fr);
   }
 
+  html,
+  body {
+    overflow-x: clip;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button,
+  a,
+  select,
+  input,
+  textarea {
+    touch-action: manipulation;
+  }
+
+  .overflow-x-auto,
+  .overflow-y-auto {
+    -webkit-overflow-scrolling: touch;
+  }
+
   .font-mono,
   .tabular-nums {
     font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Hide scrollbars on horizontal swipe strips (mobile tabs & quick filters) */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Safe-area padding utilities for notched smartphones & tablets */
+.pb-safe {
+  padding-bottom: max(0.35rem, env(safe-area-inset-bottom));
+}
+.pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+
+/* Ensure all fixed full-screen modals remain scrollable on compact phone/tablet viewports */
+@media (max-width: 1023px) {
+  .fixed.inset-0 {
+    overflow-y: auto;
   }
 }
 

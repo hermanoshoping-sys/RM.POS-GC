@@ -717,7 +717,7 @@ export const CategoriesModule: React.FC<CategoriesModuleProps> = ({
   const renderBlankRows = (currentCount: number, colCount: number) => {
     const emptyCount = Math.max(0, MIN_SHEET_ROWS - currentCount);
     return Array.from({ length: emptyCount }).map((_, idx) => (
-      <tr key={`blank-${idx}`} className="h-[31px] bg-white">
+      <tr key={`blank-${idx}`} className={`h-[31px] bg-white ${idx >= 3 ? 'hidden sm:table-row' : ''}`}>
         {Array.from({ length: colCount }).map((__, colIdx) => (
           <td key={colIdx} className="border border-slate-800/80 px-2 py-1" />
         ))}
@@ -759,10 +759,10 @@ export const CategoriesModule: React.FC<CategoriesModuleProps> = ({
         </div>
       )}
 
-      {/* Search + Contextual Filter/Period Bar (Matching InventoryModule Style 1-to-1) */}
+      {/* Search + Contextual Filter/Period Bar */}
       <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 bg-white px-2 py-2 rounded-lg border border-slate-200 shadow-xs">
         {/* Search Input */}
-        <div className="relative flex-1 min-w-[210px]">
+        <div className="relative w-full sm:flex-1 sm:min-w-[200px]">
           <Search className="pointer-events-none absolute top-1/2 -translate-y-1/2 start-3 h-4 w-4 text-slate-500" />
           <input
             type="text"
@@ -790,7 +790,7 @@ export const CategoriesModule: React.FC<CategoriesModuleProps> = ({
         {/* Filter buttons for List & Stock Summary tabs */}
         {(activeTab === 'list' || activeTab === 'stock_summary') && (
           <>
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex flex-nowrap sm:flex-wrap items-center gap-1.5 overflow-x-auto no-scrollbar w-full sm:w-auto pb-0.5 sm:pb-0">
               {(
                 [
                   { id: 'all', ar: `الكل (${categories.length})`, fr: `Toutes (${categories.length})` },
@@ -806,7 +806,7 @@ export const CategoriesModule: React.FC<CategoriesModuleProps> = ({
                     key={f.id}
                     type="button"
                     onClick={() => setFilterType(f.id)}
-                    className={`rounded-lg border-[1.5px] px-2.5 sm:px-3 py-2 text-xs font-bold transition-colors whitespace-nowrap shrink-0 ${
+                    className={`min-h-[36px] rounded-lg border-[1.5px] px-2.5 sm:px-3 py-1.5 sm:py-2 text-xs font-bold transition-colors whitespace-nowrap shrink-0 ${
                       isActive
                         ? 'border-[#0B274D] bg-[#FCE08B] text-slate-950 shadow-xs'
                         : 'border-slate-900 bg-white text-slate-900 hover:bg-slate-100'
@@ -821,7 +821,7 @@ export const CategoriesModule: React.FC<CategoriesModuleProps> = ({
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as 'order' | 'name' | 'count' | 'stock_value')}
-              className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-bold text-slate-800 focus:border-slate-900 focus:outline-none"
+              className="flex-1 sm:flex-initial rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-bold text-slate-800 focus:border-slate-900 focus:outline-none"
             >
               <option value="order">{t(lang, 'الترتيب الافتراضي', 'Ordre par défaut')}</option>
               <option value="name">{t(lang, 'حسب الاسم', 'Par nom')}</option>
@@ -832,7 +832,7 @@ export const CategoriesModule: React.FC<CategoriesModuleProps> = ({
             <button
               type="button"
               onClick={openNew}
-              className="inline-flex items-center gap-1.5 rounded-lg border-[1.5px] border-teal-900 bg-teal-700 px-3.5 py-2 text-xs font-extrabold text-white hover:bg-teal-800 transition-colors whitespace-nowrap shrink-0"
+              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border-[1.5px] border-teal-900 bg-teal-700 px-3.5 py-2 text-xs font-extrabold text-white hover:bg-teal-800 transition-colors whitespace-nowrap shrink-0"
             >
               <Plus className="h-4 w-4" />
               {t(lang, 'إضافة عائلة جديدة', 'Nouvelle famille')}
@@ -840,10 +840,10 @@ export const CategoriesModule: React.FC<CategoriesModuleProps> = ({
           </>
         )}
 
-        {/* 6 Quick Date Period Buttons + Date Range for Sales & Profit tab (Exact Inventory Style) */}
+        {/* 6 Quick Date Period Buttons + Date Range for Sales & Profit tab */}
         {activeTab === 'sales_stats' && (
           <>
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex flex-nowrap sm:flex-wrap items-center gap-1.5 overflow-x-auto no-scrollbar w-full sm:w-auto pb-0.5 sm:pb-0">
               {QUICK_PERIODS.map((p) => {
                 const isActive = activePeriod === p.id;
                 return (
@@ -851,7 +851,7 @@ export const CategoriesModule: React.FC<CategoriesModuleProps> = ({
                     key={p.id}
                     type="button"
                     onClick={() => handleSelectQuickPeriod(p.id)}
-                    className={`rounded-lg border-[1.5px] px-2.5 sm:px-3.5 py-2 text-xs sm:text-[13px] font-bold transition-colors whitespace-nowrap shrink-0 ${
+                    className={`min-h-[36px] rounded-lg border-[1.5px] px-2.5 sm:px-3.5 py-1.5 sm:py-2 text-xs sm:text-[13px] font-bold transition-colors whitespace-nowrap shrink-0 ${
                       isActive
                         ? 'border-[#0B274D] bg-[#FCE08B] text-slate-950 shadow-xs'
                         : 'border-slate-900 bg-white text-slate-900 hover:bg-slate-100'
@@ -863,31 +863,33 @@ export const CategoriesModule: React.FC<CategoriesModuleProps> = ({
               })}
             </div>
 
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="grid grid-cols-2 sm:flex sm:items-center gap-1.5 w-full sm:w-auto shrink-0">
               <input
                 type="date"
                 value={dateFrom}
                 onChange={(e) => handleManualDateFrom(e.target.value)}
                 title={t(lang, 'من تاريخ', 'Du')}
-                className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
+                className="w-full sm:w-auto rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
               />
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(e) => handleManualDateTo(e.target.value)}
-                title={t(lang, 'إلى تاريخ', 'Au')}
-                className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
-              />
-              {(dateFrom || dateTo) && (
-                <button
-                  type="button"
-                  onClick={clearDateFilter}
-                  title={t(lang, 'عرض كل الفترات', 'Toutes les dates')}
-                  className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200 transition-colors"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                </button>
-              )}
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="date"
+                  value={dateTo}
+                  onChange={(e) => handleManualDateTo(e.target.value)}
+                  title={t(lang, 'إلى تاريخ', 'Au')}
+                  className="w-full sm:w-auto flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
+                />
+                {(dateFrom || dateTo) && (
+                  <button
+                    type="button"
+                    onClick={clearDateFilter}
+                    title={t(lang, 'عرض كل الفترات', 'Toutes les dates')}
+                    className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200 transition-colors shrink-0"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
           </>
         )}

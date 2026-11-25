@@ -178,16 +178,18 @@ const AppShell: React.FC = () => {
     }
   };
 
+  const showMobileBottomNav = activeSection !== 'pos' && activeSection !== 'purchases';
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
-      {/* Executive Navy & Gold Top Header Bar (Matching Image 2) */}
-      <header className="no-print sticky top-0 z-30 w-full bg-gradient-to-r from-[#041022] via-[#0B274D] to-[#041022] border-b-[3px] border-[#D9A738] shadow-md">
-        <div className="relative mx-auto flex h-16 max-w-[1600px] items-center justify-between px-3 sm:px-6 gap-2">
+    <div className="min-h-dvh bg-slate-50 text-slate-900 flex flex-col">
+      {/* Executive Navy & Gold Top Header Bar */}
+      <header className="no-print sticky top-0 z-30 w-full bg-gradient-to-r from-[#041022] via-[#0B274D] to-[#041022] border-b-[3px] border-[#D9A738] shadow-md pt-safe">
+        <div className="relative mx-auto flex h-14 sm:h-16 max-w-[1600px] items-center justify-between px-2.5 sm:px-5 lg:px-6 gap-2">
           {/* Start Zone (Right in RTL): Store Logo & Store Name */}
           <button
             type="button"
             onClick={() => setActiveSection('home')}
-            className="flex items-center gap-2.5 min-w-0 text-start group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E5B84B] rounded-lg py-1"
+            className="flex items-center gap-2 sm:gap-2.5 min-w-0 text-start group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E5B84B] rounded-lg py-1"
             title={t(lang, 'العودة إلى القائمة الرئيسية', 'Retour au menu principal')}
           >
             {settings.storeInfo.logoDataUrl ? (
@@ -195,24 +197,24 @@ const AppShell: React.FC = () => {
                 src={settings.storeInfo.logoDataUrl}
                 alt={settings.storeInfo.storeName}
                 referrerPolicy="no-referrer"
-                className="h-9 w-9 rounded-lg border border-[#D9A738]/60 bg-white/10 object-contain p-0.5 shrink-0"
+                className="h-8 w-8 sm:h-9 sm:w-9 rounded-lg border border-[#D9A738]/60 bg-white/10 object-contain p-0.5 shrink-0"
               />
             ) : (
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#D9A738]/60 bg-gradient-to-b from-[#173E73] to-[#0A2040] text-[#F5C656] font-extrabold text-sm shrink-0 shadow-inner">
+              <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg border border-[#D9A738]/60 bg-gradient-to-b from-[#173E73] to-[#0A2040] text-[#F5C656] font-extrabold text-sm shrink-0 shadow-inner">
                 {settings.storeInfo.storeName.slice(0, 1) || 'م'}
               </div>
             )}
-            <span className="text-sm sm:text-base font-bold tracking-tight text-white truncate max-w-[140px] sm:max-w-[240px] group-hover:text-[#FDE68A] transition-colors">
+            <span className="hidden sm:inline text-sm lg:text-base font-bold tracking-tight text-white truncate max-w-[130px] md:max-w-[175px] lg:max-w-[230px] group-hover:text-[#FDE68A] transition-colors">
               {settings.storeInfo.storeName}
             </span>
           </button>
 
-          {/* Center Zone: Sculpted Metallic Gold Crest (RM.POS GC Logo & Name) */}
+          {/* Center Zone (Desktop lg+): Sculpted Metallic Gold Crest (RM.POS GC Logo & Name) */}
           <button
             type="button"
             onClick={() => setActiveSection('home')}
             title={t(lang, 'القائمة الرئيسية — RM.POS GC', 'Menu principal — RM.POS GC')}
-            className="hidden md:flex absolute left-1/2 top-0 -translate-x-1/2 h-[60px] min-w-[290px] lg:min-w-[350px] items-center justify-center gap-2.5 px-10 bg-gradient-to-b from-[#FEF08A] via-[#F2B83B] to-[#C98512] text-[#1A1205] shadow-[0_6px_16px_rgba(0,0,0,0.45)] transition-transform duration-150 hover:brightness-105 focus-visible:outline-none [clip-path:polygon(0_0,100%_0,90%_100%,10%_100%)]"
+            className="hidden lg:flex absolute left-1/2 top-0 -translate-x-1/2 h-[60px] min-w-[300px] xl:min-w-[350px] items-center justify-center gap-2.5 px-10 bg-gradient-to-b from-[#FEF08A] via-[#F2B83B] to-[#C98512] text-[#1A1205] shadow-[0_6px_16px_rgba(0,0,0,0.45)] transition-transform duration-150 hover:brightness-105 focus-visible:outline-none [clip-path:polygon(0_0,100%_0,90%_100%,10%_100%)]"
           >
             <img
               src="/assets/aistudio/image_39bba8ff.png"
@@ -221,37 +223,37 @@ const AppShell: React.FC = () => {
             />
             <span
               dir="ltr"
-              className="text-lg lg:text-xl font-black tracking-wide text-[#0B1F44] whitespace-nowrap"
+              className="text-lg xl:text-xl font-black tracking-wide text-[#0B1F44] whitespace-nowrap"
             >
               RM.POS GC
             </span>
           </button>
 
-          {/* Compact Mobile RM.POS GC Identity */}
+          {/* Compact Phone & Tablet RM.POS GC Identity (prevents overlap on <1024px) */}
           <button
             type="button"
             onClick={() => setActiveSection('home')}
-            className="flex md:hidden items-center gap-1.5 rounded-lg bg-gradient-to-b from-[#FEF08A] via-[#F2B83B] to-[#C98512] px-2.5 py-1 shadow-sm shrink-0"
+            className="flex lg:hidden items-center gap-1.5 sm:gap-2 rounded-lg bg-gradient-to-b from-[#FEF08A] via-[#F2B83B] to-[#C98512] px-2.5 sm:px-3.5 py-1 sm:py-1.5 shadow-sm shrink-0"
           >
             <img
               src="/assets/aistudio/image_39bba8ff.png"
               alt="RM.POS GC"
-              className="h-7 w-7 rounded-md object-contain shrink-0"
+              className="h-7 w-7 sm:h-8 sm:w-8 rounded-md object-contain shrink-0"
             />
-            <span dir="ltr" className="text-xs font-black tracking-wide text-[#0B1F44] whitespace-nowrap">
+            <span dir="ltr" className="text-xs sm:text-sm font-black tracking-wide text-[#0B1F44] whitespace-nowrap">
               RM.POS GC
             </span>
           </button>
 
           {/* End Zone (Left in RTL): Live Date & Time + Utility Controls */}
-          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {/* Live Date & Clock */}
-            <div className="hidden sm:flex items-center gap-2.5 border-s border-white/25 ps-3 text-xs text-white font-mono tabular-nums" dir="ltr">
-              <span className="inline-flex items-center gap-1.5 font-semibold">
+          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+            {/* Live Date & Clock (Full on xl+, compact time on md-lg) */}
+            <div className="hidden md:flex items-center gap-2 border-s border-white/25 ps-2.5 text-xs text-white font-mono tabular-nums" dir="ltr">
+              <span className="hidden xl:inline-flex items-center gap-1.5 font-semibold">
                 <Calendar className="h-3.5 w-3.5 text-[#F4BE42]" />
                 {dateDisplay}
               </span>
-              <span className="text-white/30">|</span>
+              <span className="hidden xl:inline text-white/30">|</span>
               <span className="inline-flex items-center gap-1.5 font-semibold">
                 <Clock className="h-3.5 w-3.5 text-[#F4BE42]" />
                 {timeDisplay}
@@ -265,7 +267,7 @@ const AppShell: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setLang('ar')}
-                className={`rounded-md px-2 py-1 font-bold transition-colors ${
+                className={`min-h-[30px] rounded-md px-2 py-1 font-bold transition-colors ${
                   lang === 'ar' ? 'bg-[#F2B83B] text-slate-950' : 'text-blue-100 hover:text-white'
                 }`}
               >
@@ -274,7 +276,7 @@ const AppShell: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setLang('fr')}
-                className={`rounded-md px-2 py-1 font-bold transition-colors ${
+                className={`min-h-[30px] rounded-md px-2 py-1 font-bold transition-colors ${
                   lang === 'fr' ? 'bg-[#F2B83B] text-slate-950' : 'text-blue-100 hover:text-white'
                 }`}
               >
@@ -287,7 +289,7 @@ const AppShell: React.FC = () => {
               type="button"
               onClick={() => setIsLocked(true)}
               title={`${currentUser?.fullName ?? 'Admin'} — ${t(lang, 'قفل النظام', 'Verrouiller')}`}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-white/20 transition-colors shrink-0"
+              className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-white/20 transition-colors shrink-0"
             >
               <Lock className="h-3.5 w-3.5 text-[#F4BE42]" />
               <span className="hidden xl:inline max-w-[100px] truncate">
@@ -314,7 +316,7 @@ const AppShell: React.FC = () => {
           currentId: string,
           onSelect: (id: string) => void
         ) => (
-          <div className="order-3 xl:order-2 flex w-full xl:w-auto flex-wrap items-center justify-center gap-1.5 sm:gap-2">
+          <div className="order-3 xl:order-2 flex w-full xl:w-auto flex-nowrap sm:flex-wrap items-center justify-start sm:justify-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar pb-0.5 sm:pb-0">
             {items.map((tab) => {
               const isActive = currentId === tab.id;
               return (
@@ -322,7 +324,7 @@ const AppShell: React.FC = () => {
                   key={tab.id}
                   type="button"
                   onClick={() => onSelect(tab.id)}
-                  className={`rounded-lg border-[1.5px] px-3 sm:px-3.5 py-1.5 text-xs sm:text-[13px] font-bold transition-all whitespace-nowrap shrink-0 ${
+                  className={`min-h-[36px] rounded-lg border-[1.5px] px-3 sm:px-3.5 py-1.5 text-xs sm:text-[13px] font-bold transition-all whitespace-nowrap shrink-0 ${
                     isActive
                       ? 'border-[#0B274D] bg-[#0B274D] text-[#FDE68A] shadow-sm'
                       : 'border-slate-900 bg-white text-slate-900 hover:bg-amber-50'
@@ -338,23 +340,24 @@ const AppShell: React.FC = () => {
         return (
           <div className="no-print border-b border-slate-200 bg-white">
             <div
-              className={`mx-auto flex flex-wrap items-center justify-between gap-2.5 py-2 ${
-                isFullWidthModule ? 'max-w-none px-3 lg:px-4' : 'max-w-[1440px] px-4 lg:px-6'
+              className={`mx-auto flex flex-wrap items-center justify-between gap-2 py-2 ${
+                isFullWidthModule ? 'max-w-none px-2.5 sm:px-3 lg:px-4' : 'max-w-[1440px] px-2.5 sm:px-4 lg:px-6'
               }`}
             >
-              <div className="flex items-center gap-2.5 min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
                 <button
                   type="button"
                   onClick={() => setActiveSection('home')}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#2563A6] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#1C4F87] transition-colors whitespace-nowrap shrink-0"
+                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg bg-[#2563A6] px-2.5 sm:px-3 py-1.5 text-xs font-bold text-white hover:bg-[#1C4F87] transition-colors whitespace-nowrap shrink-0"
                 >
                   <ArrowRight className={`h-3.5 w-3.5 ${lang === 'fr' ? 'rotate-180' : ''}`} />
-                  {t(lang, 'القائمة الرئيسية', 'Menu principal')}
+                  <span className="hidden sm:inline">{t(lang, 'القائمة الرئيسية', 'Menu principal')}</span>
+                  <span className="sm:hidden">{t(lang, 'الرئيسية', 'Accueil')}</span>
                 </button>
 
                 <span className="text-slate-300">/</span>
 
-                <span className="text-sm font-bold text-slate-900 truncate">
+                <span className="text-xs sm:text-sm font-bold text-slate-900 truncate">
                   {activeNavDef
                     ? lang === 'ar'
                       ? activeNavDef.labelAr
@@ -442,21 +445,21 @@ const AppShell: React.FC = () => {
                   (id) => setSettingsTab(id as SettingsTabId)
                 )}
 
-              <div className="order-2 xl:order-3 flex items-center gap-2 shrink-0">
+              <div className="order-2 xl:order-3 flex items-center gap-1.5 sm:gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={() => setQuickNavOpen(true)}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 sm:px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
                 >
                   <LayoutGrid className="h-3.5 w-3.5 text-[#2563A6]" />
-                  {t(lang, 'التنقل السريع', 'Navigation')}
+                  <span className="hidden xs:inline sm:inline">{t(lang, 'التنقل السريع', 'Navigation')}</span>
                 </button>
 
                 {hasPermission(currentUser, 'canSell') && (
                   <button
                     type="button"
                     onClick={() => setActiveSection('pos')}
-                    className="hidden sm:inline-flex items-center gap-1.5 rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-teal-800 whitespace-nowrap shrink-0"
+                    className="hidden sm:inline-flex min-h-[36px] items-center gap-1.5 rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-teal-800 whitespace-nowrap shrink-0"
                   >
                     <ShoppingCart className="h-3.5 w-3.5" />
                     {t(lang, 'نقطة بيع', 'POS')}
@@ -468,11 +471,11 @@ const AppShell: React.FC = () => {
         );
       })()}
 
-      {/* Main Content Area (Full-width without sidebar obstruction) */}
+      {/* Main Content Area (Full-width without sidebar obstruction, with bottom safe space for mobile nav) */}
       <main
-        className={`no-print flex-1 w-full mx-auto ${
+        className={`no-print flex-1 w-full mx-auto ${showMobileBottomNav ? 'pb-20 md:pb-6' : 'pb-4'} ${
           activeSection === 'pos' || activeSection === 'purchases'
-            ? 'p-2 lg:p-3 max-w-none'
+            ? 'p-1.5 sm:p-2 lg:p-3 max-w-none'
             : activeSection === 'inventory' ||
                 activeSection === 'categories' ||
                 activeSection === 'payments' ||
@@ -480,20 +483,106 @@ const AppShell: React.FC = () => {
                 activeSection === 'profit_reports' ||
                 activeSection === 'settings' ||
                 activeSection === 'dashboard'
-              ? 'p-2.5 sm:p-3.5 max-w-none'
+              ? 'p-2 sm:p-3.5 max-w-none'
               : activeSection === 'home'
-                ? 'p-4 sm:p-6 lg:p-8 max-w-[1440px] flex items-center'
-                : 'p-4 lg:p-6 max-w-[1440px]'
+                ? 'p-3 sm:p-6 lg:p-8 max-w-[1440px] flex items-start sm:items-center'
+                : 'p-2.5 sm:p-4 lg:p-6 max-w-[1440px]'
         }`}
       >
         {renderSection()}
       </main>
 
-      {/* Quick Navigation Switcher Modal */}
+      {/* Mobile Bottom Navigation Bar (Phones only, thumb-zone ergonomics) */}
+      {showMobileBottomNav && (
+        <nav
+          aria-label={t(lang, 'التنقل السريع للهاتف', 'Navigation mobile')}
+          className="no-print md:hidden fixed bottom-0 inset-x-0 z-30 border-t border-slate-200 bg-white/95 backdrop-blur-md shadow-[0_-4px_16px_rgba(15,23,42,0.08)] pb-safe"
+        >
+          <div className="grid grid-cols-5 items-center h-14 px-1">
+            {[
+              {
+                id: 'home' as const,
+                label: t(lang, 'الرئيسية', 'Accueil'),
+                icon: LayoutDashboard,
+                allowed: true,
+                onClick: () => setActiveSection('home'),
+              },
+              {
+                id: 'pos' as const,
+                label: t(lang, 'نقطة بيع', 'POS'),
+                icon: ShoppingCart,
+                allowed: canAccessSection(currentUser, 'pos'),
+                onClick: () => setActiveSection('pos'),
+              },
+              {
+                id: 'inventory' as const,
+                label: t(lang, 'المخزون', 'Stock'),
+                icon: Boxes,
+                allowed: canAccessSection(currentUser, 'inventory'),
+                onClick: () => setActiveSection('inventory'),
+              },
+              {
+                id: 'payments' as const,
+                label: t(lang, 'الدفعات', 'Caisse'),
+                icon: Wallet,
+                allowed: canAccessSection(currentUser, 'payments'),
+                onClick: () => setActiveSection('payments'),
+              },
+              {
+                id: 'more' as const,
+                label: t(lang, 'الأقسام', 'Menu'),
+                icon: LayoutGrid,
+                allowed: true,
+                onClick: () => setQuickNavOpen(true),
+              },
+            ].map((item) => {
+              const Icon = item.icon;
+              const isActive =
+                item.id === 'more'
+                  ? quickNavOpen
+                  : activeSection === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  disabled={!item.allowed}
+                  onClick={item.onClick}
+                  className={`flex flex-col items-center justify-center gap-0.5 min-h-[44px] rounded-lg px-1 transition-colors ${
+                    !item.allowed
+                      ? 'opacity-35 text-slate-400'
+                      : isActive
+                        ? 'text-[#0B274D] font-extrabold'
+                        : 'text-slate-500 hover:text-slate-900 font-semibold'
+                  }`}
+                >
+                  <span
+                    className={`flex h-7 w-10 items-center justify-center rounded-full transition-colors ${
+                      isActive ? 'bg-[#FCE08B] text-[#0B274D]' : ''
+                    }`}
+                  >
+                    <Icon className="h-4.5 w-4.5" />
+                  </span>
+                  <span className="text-[10px] leading-tight truncate max-w-full">
+                    {item.label}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+      )}
+
+      {/* Quick Navigation Switcher Modal (Bottom-sheet style on mobile, centered on tablet/desktop) */}
       {quickNavOpen && (
-        <div className="no-print fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-[1px]">
-          <div className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
-            <div className="mb-4 flex items-center justify-between border-b border-slate-200 pb-3">
+        <div
+          className="no-print fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/60 p-0 sm:p-4 backdrop-blur-[1px]"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setQuickNavOpen(false);
+          }}
+        >
+          <div className="w-full max-w-2xl max-h-[88dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 shadow-2xl pb-safe">
+            <div className="sm:hidden mx-auto mb-2.5 h-1.5 w-10 rounded-full bg-slate-300" />
+            <div className="mb-3.5 flex items-center justify-between border-b border-slate-200 pb-3">
               <div className="flex items-center gap-2">
                 <LayoutGrid className="h-4 w-4 text-[#2563A6]" />
                 <h3 className="text-sm font-bold text-slate-900">
@@ -503,13 +592,13 @@ const AppShell: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setQuickNavOpen(false)}
-                className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100"
+                className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5 sm:gap-3">
               {NAV_SECTIONS.map((item) => {
                 const Icon = SECTION_ICONS[item.id] ?? LayoutDashboard;
                 const theme = getNavTileTheme(item.id);
@@ -526,8 +615,8 @@ const AppShell: React.FC = () => {
                       setActiveSection(item.id);
                       setQuickNavOpen(false);
                     }}
-                    className={`relative flex flex-col items-center justify-center gap-2 rounded-2xl border ${theme.borderColor} bg-gradient-to-b ${theme.quickBg} px-3 py-3 text-center text-xs font-bold text-white transition-all ${
-                      allowed ? 'hover:brightness-105' : 'opacity-40 grayscale cursor-not-allowed'
+                    className={`relative flex flex-col items-center justify-center gap-1.5 sm:gap-2 rounded-2xl border ${theme.borderColor} bg-gradient-to-b ${theme.quickBg} px-2.5 py-2.5 sm:px-3 sm:py-3 text-center text-xs font-bold text-white transition-all ${
+                      allowed ? 'hover:brightness-105 active:scale-[0.98]' : 'opacity-40 grayscale cursor-not-allowed'
                     } ${isActive ? 'ring-2 ring-[#E5B84B] shadow-md' : ''}`}
                   >
                     {!allowed && (
@@ -535,7 +624,7 @@ const AppShell: React.FC = () => {
                         <Lock className="h-3 w-3 text-amber-300" />
                       </span>
                     )}
-                    <div className="h-12 w-12 overflow-hidden rounded-xl bg-white/95 shadow-sm ring-1 ring-white/40 flex items-center justify-center">
+                    <div className="h-11 w-11 sm:h-12 sm:w-12 overflow-hidden rounded-xl bg-white/95 shadow-sm ring-1 ring-white/40 flex items-center justify-center">
                       <img
                         src={theme.imageUrl}
                         alt={label}
@@ -563,7 +652,7 @@ const AppShell: React.FC = () => {
       <OfflineIndicator lang={lang} />
 
       {/* Toast Notifications */}
-      <div className="no-print fixed bottom-4 end-4 z-50 flex flex-col gap-2 max-w-sm">
+      <div className="no-print fixed bottom-16 md:bottom-4 inset-x-3 sm:inset-x-auto sm:end-4 z-50 flex flex-col gap-2 sm:max-w-sm">
         {toasts.map((toast) => (
           <div
             key={toast.id}

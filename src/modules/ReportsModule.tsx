@@ -526,7 +526,7 @@ export const ReportsModule: React.FC<ReportsModuleProps> = ({
   const renderBlankRows = (currentCount: number, colCount: number) => {
     const emptyCount = Math.max(0, MIN_SHEET_ROWS - currentCount);
     return Array.from({ length: emptyCount }).map((_, idx) => (
-      <tr key={`blank-${idx}`} className="h-[31px] bg-white">
+      <tr key={`blank-${idx}`} className={`h-[31px] bg-white ${idx >= 3 ? 'hidden sm:table-row' : ''}`}>
         {Array.from({ length: colCount }).map((__, colIdx) => (
           <td key={colIdx} className="border border-slate-800/80 px-2 py-1" />
         ))}
@@ -575,9 +575,9 @@ export const ReportsModule: React.FC<ReportsModuleProps> = ({
         )
       ) : (
         <>
-          {/* Search + 6 Quick Period Buttons + Date Range (Exact Inventory Style) */}
+          {/* Search + 6 Quick Period Buttons + Date Range */}
           <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 bg-white px-2 py-2 rounded-lg border border-slate-200 shadow-xs">
-            <div className="relative flex-1 min-w-[200px]">
+            <div className="relative w-full sm:flex-1 sm:min-w-[200px]">
               <Search className="pointer-events-none absolute top-1/2 -translate-y-1/2 start-3 h-4 w-4 text-slate-500" />
               <input
                 type="text"
@@ -597,7 +597,7 @@ export const ReportsModule: React.FC<ReportsModuleProps> = ({
               )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex flex-nowrap sm:flex-wrap items-center gap-1.5 overflow-x-auto no-scrollbar w-full sm:w-auto pb-0.5 sm:pb-0">
               {QUICK_PERIODS.map((p) => {
                 const isActive = activePeriod === p.id;
                 return (
@@ -605,7 +605,7 @@ export const ReportsModule: React.FC<ReportsModuleProps> = ({
                     key={p.id}
                     type="button"
                     onClick={() => handleSelectQuickPeriod(p.id)}
-                    className={`rounded-lg border-[1.5px] px-2.5 sm:px-3.5 py-2 text-xs sm:text-[13px] font-bold transition-colors whitespace-nowrap shrink-0 ${
+                    className={`min-h-[36px] rounded-lg border-[1.5px] px-2.5 sm:px-3.5 py-1.5 sm:py-2 text-xs sm:text-[13px] font-bold transition-colors whitespace-nowrap shrink-0 ${
                       isActive
                         ? 'border-[#0B274D] bg-[#FCE08B] text-slate-950 shadow-xs'
                         : 'border-slate-900 bg-white text-slate-900 hover:bg-slate-100'
@@ -617,34 +617,36 @@ export const ReportsModule: React.FC<ReportsModuleProps> = ({
               })}
             </div>
 
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="grid grid-cols-2 sm:flex sm:items-center gap-1.5 w-full sm:w-auto shrink-0">
               <input
                 type="date"
                 value={dateFrom}
                 onChange={(e) => handleManualDateFrom(e.target.value)}
-                className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
+                className="w-full sm:w-auto rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
               />
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(e) => handleManualDateTo(e.target.value)}
-                className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
-              />
-              {(dateFrom || dateTo) && (
-                <button
-                  type="button"
-                  onClick={clearDateFilter}
-                  title={t(lang, 'عرض كل الفترات', 'Toutes les dates')}
-                  className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                </button>
-              )}
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="date"
+                  value={dateTo}
+                  onChange={(e) => handleManualDateTo(e.target.value)}
+                  className="w-full sm:w-auto flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
+                />
+                {(dateFrom || dateTo) && (
+                  <button
+                    type="button"
+                    onClick={clearDateFilter}
+                    title={t(lang, 'عرض كل الفترات', 'Toutes les dates')}
+                    className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200 shrink-0"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
           {/* Specific Report Selector Strip */}
-          <div className="flex flex-wrap items-center gap-1.5 bg-white px-2 py-1.5 rounded-lg border border-slate-200">
+          <div className="flex flex-nowrap sm:flex-wrap items-center gap-1.5 overflow-x-auto no-scrollbar bg-white px-2 py-1.5 rounded-lg border border-slate-200">
             {groupReports.map((r) => {
               const isSelected = selectedReport === r.key;
               return (

@@ -351,8 +351,8 @@ export const CustomersModule: React.FC = () => {
       {/* Action & Filter Toolbar (Exact layout & color hierarchy from blueprint) */}
       <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
         {/* Start (Right in RTL): Search box + 3 Status Filters (الكل / عليهم ديون / حساب مصفى) */}
-        <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
-          <div className="relative flex-1 min-w-[210px] max-w-sm">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:flex-1 sm:min-w-0">
+          <div className="relative w-full sm:flex-1 sm:min-w-[200px] sm:max-w-sm">
             <Search className="pointer-events-none absolute top-1/2 -translate-y-1/2 start-3 h-4 w-4 text-sky-700" />
             <input
               type="text"
@@ -592,7 +592,7 @@ export const CustomersModule: React.FC = () => {
 
               {/* Crisp empty ledger rows matching the blueprint sheet */}
               {Array.from({ length: emptyFillerCount }).map((_, idx) => (
-                <tr key={`empty-cust-${idx}`} className="h-9">
+                <tr key={`empty-cust-${idx}`} className={`h-9 ${idx >= 3 ? 'hidden sm:table-row' : ''}`}>
                   <td className="border border-slate-800/60" />
                   <td className="border border-slate-800/60" />
                   <td className="border border-slate-800/60" />

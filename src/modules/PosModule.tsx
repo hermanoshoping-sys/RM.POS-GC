@@ -83,6 +83,7 @@ export const PosModule: React.FC = () => {
   const cur = settings.storeInfo.currency || 'MAD';
 
   const [activeTab, setActiveTab] = useState<'pos' | 'sales_log'>('pos');
+  const [mobilePane, setMobilePane] = useState<'catalog' | 'cart'>('catalog');
   const [now, setNow] = useState<Date>(() => new Date());
 
   // Live clock for top amber header
@@ -800,28 +801,28 @@ export const PosModule: React.FC = () => {
   });
 
   return (
-    <div className="space-y-3">
-      {/* TOP AMBER/GOLD BAR (Matching blueprint image) */}
-      <div className="rounded-xl border-2 border-amber-400 bg-amber-300 px-3 py-2 shadow-sm text-slate-950">
-        <div className="flex flex-wrap items-center justify-between gap-2.5">
+    <div className="space-y-2.5 sm:space-y-3">
+      {/* TOP AMBER/GOLD BAR (Responsive for Phone, Tablet & Desktop) */}
+      <div className="rounded-xl border-2 border-amber-400 bg-amber-300 px-2.5 sm:px-3 py-2 shadow-sm text-slate-950">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           {/* Start (Right in RTL): Back button + Customer Selector */}
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-1 sm:flex-initial items-center gap-1.5 sm:gap-2 min-w-0">
             <button
               type="button"
               onClick={() => setActiveSection('home')}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-600/40 bg-amber-200/80 px-3 py-1.5 text-xs font-extrabold text-slate-950 hover:bg-white transition-colors"
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-amber-600/40 bg-amber-200/80 px-2.5 sm:px-3 py-1.5 text-xs font-extrabold text-slate-950 hover:bg-white transition-colors shrink-0"
             >
               <ArrowRight className={`h-4 w-4 ${lang === 'fr' ? 'rotate-180' : ''}`} />
               <span>{t(lang, 'الرجوع', 'Retour')}</span>
             </button>
 
-            <div className="flex items-center gap-1.5 rounded-lg border border-amber-600/40 bg-white/90 px-2.5 py-1">
+            <div className="flex flex-1 sm:flex-initial min-w-0 items-center gap-1.5 rounded-lg border border-amber-600/40 bg-white/90 px-2 py-1.5">
               <UserCheck className="h-4 w-4 text-amber-800 shrink-0" />
               <select
                 value={customerId}
                 onChange={(e) => setCustomerId(Number(e.target.value))}
                 aria-label={t(lang, 'اختيار الزبون', 'Choisir le client')}
-                className="bg-transparent text-xs font-bold text-slate-900 focus:outline-none max-w-[180px] sm:max-w-[220px]"
+                className="w-full min-w-0 bg-transparent text-xs font-bold text-slate-900 focus:outline-none sm:max-w-[200px] lg:max-w-[220px]"
               >
                 {customers.map((c) => (
                   <option key={c.id} value={c.id}>
@@ -832,9 +833,9 @@ export const PosModule: React.FC = () => {
             </div>
           </div>
 
-          {/* Center: Logo + Program Name + Quick POS / Log Switcher */}
-          <div className="flex flex-wrap items-center justify-center gap-2.5">
-            <div className="flex items-center gap-2">
+          {/* Center: Logo (md+) + Quick POS / Log Switcher */}
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <div className="hidden md:flex items-center gap-2">
               <img
                 src="/assets/aistudio/image_39bba8ff.png"
                 alt="RM.POS GC"
@@ -844,7 +845,7 @@ export const PosModule: React.FC = () => {
                 <div className="flex items-center gap-1.5 text-sm font-black tracking-tight text-slate-950">
                   <span dir="ltr">RM.POS GC</span>
                   <span className="text-amber-900/50">·</span>
-                  <span className="truncate max-w-[160px]">{settings.storeInfo.storeName}</span>
+                  <span className="truncate max-w-[140px] lg:max-w-[160px]">{settings.storeInfo.storeName}</span>
                 </div>
                 <div className="text-[10px] font-bold text-amber-950/75">
                   {t(lang, 'نقطة البيع السريع — POS', 'Point de Vente — POS')}
@@ -856,7 +857,7 @@ export const PosModule: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setActiveTab('pos')}
-                className={`rounded-md px-2.5 py-1 text-[11px] font-bold transition-colors whitespace-nowrap ${
+                className={`min-h-[34px] rounded-md px-2.5 py-1 text-[11px] font-bold transition-colors whitespace-nowrap ${
                   activeTab === 'pos'
                     ? 'bg-slate-950 text-amber-300 shadow-sm'
                     : 'text-slate-900 hover:bg-amber-200/70'
@@ -867,29 +868,29 @@ export const PosModule: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setActiveTab('sales_log')}
-                className={`rounded-md px-2.5 py-1 text-[11px] font-bold transition-colors whitespace-nowrap ${
+                className={`min-h-[34px] rounded-md px-2.5 py-1 text-[11px] font-bold transition-colors whitespace-nowrap ${
                   activeTab === 'sales_log'
                     ? 'bg-slate-950 text-amber-300 shadow-sm'
                     : 'text-slate-900 hover:bg-amber-200/70'
                 }`}
               >
-                {t(lang, `6.1 سجل الفواتير (${saleInvoices.length})`, `6.1 Journal (${saleInvoices.length})`)}
+                {t(lang, `6.1 الفواتير (${saleInvoices.length})`, `6.1 Journal (${saleInvoices.length})`)}
               </button>
             </div>
           </div>
 
-          {/* End (Left in RTL): One-Tap Camera Scan + Price Tier + Live Date & Time */}
-          <div className="flex items-center gap-2">
+          {/* End (Left in RTL): One-Tap Camera Scan + Drawer + Price Tier + Live Date & Time */}
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
             {activeTab === 'pos' && (
               <>
                 <button
                   type="button"
                   onClick={() => setShowCameraScanner(true)}
                   title={t(lang, 'مسح الباركود بكاميرا الجهاز (F2)', 'Scanner code-barres caméra (F2)')}
-                  className="inline-flex items-center gap-1.5 rounded-lg border-2 border-slate-900 bg-teal-700 px-2.5 py-1.5 text-xs font-extrabold text-white shadow-sm hover:bg-teal-800 active:scale-[0.98]"
+                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border-2 border-slate-900 bg-teal-700 px-2.5 py-1.5 text-xs font-extrabold text-white shadow-sm hover:bg-teal-800 active:scale-[0.98]"
                 >
                   <Camera className="h-4 w-4 shrink-0" />
-                  <span>{t(lang, 'مسح بالكاميرا', 'Caméra')}</span>
+                  <span className="hidden sm:inline">{t(lang, 'مسح بالكاميرا', 'Caméra')}</span>
                 </button>
                 {settings.printing.cashDrawer.enabled && (
                   <button
@@ -897,10 +898,10 @@ export const PosModule: React.FC = () => {
                     disabled={openingDrawer}
                     onClick={handleManualOpenDrawerClick}
                     title={t(lang, 'فتح درج النقدية (F9)', 'Ouvrir le tiroir-caisse (F9)')}
-                    className="inline-flex items-center gap-1.5 rounded-lg border-2 border-slate-900 bg-slate-900 px-2.5 py-1.5 text-xs font-extrabold text-amber-300 shadow-sm hover:bg-slate-800 active:scale-[0.98] disabled:opacity-60"
+                    className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border-2 border-slate-900 bg-slate-900 px-2.5 py-1.5 text-xs font-extrabold text-amber-300 shadow-sm hover:bg-slate-800 active:scale-[0.98] disabled:opacity-60"
                   >
                     <Inbox className="h-4 w-4 shrink-0" />
-                    <span>{t(lang, 'فتح الدرج (F9)', 'Tiroir (F9)')}</span>
+                    <span className="hidden sm:inline">{t(lang, 'فتح الدرج (F9)', 'Tiroir (F9)')}</span>
                   </button>
                 )}
                 <select
@@ -908,7 +909,7 @@ export const PosModule: React.FC = () => {
                   onChange={(e) =>
                     setPriceTier(e.target.value as 'retail' | 'wholesale' | 'second')
                   }
-                  className="rounded-lg border border-amber-600/40 bg-white/90 px-2 py-1 text-[11px] font-bold text-slate-900"
+                  className="min-h-[36px] rounded-lg border border-amber-600/40 bg-white/90 px-2 py-1 text-[11px] font-bold text-slate-900"
                 >
                   <option value="retail">{t(lang, 'تقسيط', 'Détail')}</option>
                   <option value="wholesale">{t(lang, 'جملة', 'Gros')}</option>
@@ -916,7 +917,7 @@ export const PosModule: React.FC = () => {
                 </select>
               </>
             )}
-            <div className="rounded-lg border border-amber-600/40 bg-amber-200/75 px-3 py-1 text-center font-mono leading-tight tabular-nums">
+            <div className="hidden sm:block rounded-lg border border-amber-600/40 bg-amber-200/75 px-2.5 py-1 text-center font-mono leading-tight tabular-nums">
               <div className="text-xs font-extrabold text-slate-950">{liveTimeStr}</div>
               <div className="text-[10px] font-semibold text-slate-800">{liveDateStr}</div>
             </div>
@@ -925,13 +926,44 @@ export const PosModule: React.FC = () => {
       </div>
 
       {activeTab === 'pos' ? (
-        /* MAIN BLUEPRINT SPLIT LAYOUT */
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5 items-stretch">
-          {/* RIGHT PANEL IN RTL (5 cols): Receipt Table + Barcode/Camera + TOTALE + Keypad & Actions */}
-          <div className="lg:col-span-5 flex flex-col gap-2">
-            {/* 1. Receipt Table (Qte | article | TTC | total) */}
-            <div className="rounded-xl border-2 border-slate-800 bg-white overflow-hidden shadow-sm">
-              <div className="h-[250px] lg:h-[295px] overflow-y-auto">
+        <>
+          {/* Phone & Portrait Tablet Quick Switcher between Catalog & Cart/Checkout */}
+          <div className="lg:hidden grid grid-cols-2 gap-1.5 rounded-xl border-2 border-slate-900 bg-white p-1 shadow-xs">
+            <button
+              type="button"
+              onClick={() => setMobilePane('catalog')}
+              className={`min-h-[42px] flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-extrabold transition-colors ${
+                mobilePane === 'catalog'
+                  ? 'bg-[#0B274D] text-[#FDE68A] shadow-sm'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              <Package className="h-4 w-4 shrink-0" />
+              <span>{t(lang, `المنتجات (${filteredProducts.length})`, `Produits (${filteredProducts.length})`)}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setMobilePane('cart')}
+              className={`min-h-[42px] flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-extrabold transition-colors ${
+                mobilePane === 'cart'
+                  ? 'bg-lime-500 text-slate-950 border border-slate-900 shadow-sm'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              <ReceiptText className="h-4 w-4 shrink-0" />
+              <span className="truncate font-mono tabular-nums">
+                {t(lang, 'السلة', 'Ticket')} ({cart.length}) · {grandTotal.toFixed(2)}
+              </span>
+            </button>
+          </div>
+
+          {/* MAIN BLUEPRINT SPLIT LAYOUT */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5 items-stretch">
+            {/* RIGHT PANEL IN RTL (5 cols): Receipt Table + Barcode/Camera + TOTALE + Keypad & Actions */}
+            <div className={`${mobilePane === 'cart' ? 'flex' : 'hidden'} lg:flex lg:col-span-5 flex-col gap-2`}>
+              {/* 1. Receipt Table (Qte | article | TTC | total) */}
+              <div className="rounded-xl border-2 border-slate-800 bg-white overflow-hidden shadow-sm">
+                <div className="h-[220px] sm:h-[260px] lg:h-[295px] overflow-y-auto">
                 <table className="w-full border-collapse text-xs">
                   <thead className="sticky top-0 z-10 bg-slate-100 text-slate-900">
                     <tr className="border-b-2 border-slate-800">
@@ -1225,9 +1257,9 @@ export const PosModule: React.FC = () => {
             </div>
 
             {/* 4. Bottom Split: Action Buttons Stack (Right in RTL) + Numeric Keypad (Left in RTL) */}
-            <div className="grid grid-cols-12 gap-1.5 items-stretch">
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-1.5 items-stretch">
               {/* Action Buttons Stack (Matches exact color stack in diagram) */}
-              <div className="col-span-6 flex flex-col gap-1">
+              <div className="sm:col-span-6 flex flex-col gap-1.5 sm:gap-1">
                 {/* Yellow: Attentes (Hold / Resume Carts) */}
                 <button
                   type="button"
@@ -1378,7 +1410,7 @@ export const PosModule: React.FC = () => {
               </div>
 
               {/* Numeric Keypad (3x4 grid: 1-9, CL, 0, ,) */}
-              <div className="col-span-6 flex flex-col gap-1">
+              <div className="sm:col-span-6 flex flex-col gap-1">
                 {/* Compact Target Mode Strip */}
                 <div className="grid grid-cols-3 gap-0.5 rounded-md border border-slate-800 bg-slate-100 p-0.5 text-[10px] font-bold">
                   <button
@@ -1450,7 +1482,33 @@ export const PosModule: React.FC = () => {
           </div>
 
           {/* LEFT PANEL IN RTL (7 cols): Dense Product Cards Grid + 2x6 Light Blue Categories Bar */}
-          <div className="lg:col-span-7 flex flex-col gap-2">
+          <div className={`${mobilePane === 'catalog' ? 'flex' : 'hidden'} lg:flex lg:col-span-7 flex-col gap-2`}>
+            {/* Mobile Quick Barcode / Name Search Bar when viewing Catalog on <lg */}
+            <div className="flex lg:hidden items-stretch gap-1.5">
+              <div className="relative flex-1">
+                <ScanBarcode className="pointer-events-none absolute top-1/2 -translate-y-1/2 start-3 h-4 w-4 text-slate-500" />
+                <input
+                  type="text"
+                  value={barcodeInput}
+                  onChange={(e) => setBarcodeInput(e.target.value)}
+                  onKeyDown={handleBarcodeEnter}
+                  placeholder={t(lang, 'باركود سريع (Enter)...', 'Code-barres rapide...')}
+                  className="w-full rounded-lg border-2 border-slate-800 bg-white py-2 ps-9 pe-3 text-xs font-bold text-slate-900 placeholder:text-slate-500 focus:border-teal-700 focus:outline-none"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowNameSearchModal(true);
+                  window.setTimeout(() => nameSearchInputRef.current?.focus(), 80);
+                }}
+                className="inline-flex min-h-[40px] items-center justify-center gap-1 rounded-lg border-2 border-slate-900 bg-lime-500 px-3 text-xs font-extrabold text-slate-950 shrink-0"
+              >
+                <Search className="h-4 w-4" />
+                <span>{t(lang, 'بحث', 'Chercher')}</span>
+              </button>
+            </div>
+
             {/* Active Name Search Filter Banner (appears when searching by name) */}
             {nameSearch && (
               <div className="flex items-center justify-between gap-2 rounded-lg border border-teal-300 bg-teal-50 px-3 py-1.5 text-xs">
@@ -1472,7 +1530,7 @@ export const PosModule: React.FC = () => {
             )}
 
             {/* Dense Peach Product Cards Grid (Matches screenshot cells) */}
-            <div className="flex-1 rounded-xl border-2 border-slate-800 bg-orange-50/40 p-1.5 overflow-y-auto max-h-[54vh] lg:max-h-[540px]">
+            <div className="flex-1 rounded-xl border-2 border-slate-800 bg-orange-50/40 p-1.5 overflow-y-auto max-h-[54dvh] sm:max-h-[58dvh] lg:max-h-[540px]">
               {filteredProducts.length === 0 ? (
                 <div className="flex h-64 flex-col items-center justify-center gap-2 text-slate-500 text-xs">
                   <Package className="h-8 w-8 text-slate-400" />
@@ -1568,14 +1626,14 @@ export const PosModule: React.FC = () => {
               </div>
 
               {/* 6x2 Light Blue Categories Grid */}
-              <div className="flex-1 grid grid-cols-3 sm:grid-cols-6 grid-rows-2 border-2 border-slate-800 rounded-md overflow-hidden bg-sky-100">
+              <div className="flex-1 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 border-2 border-slate-800 rounded-md overflow-hidden bg-sky-100">
                 {Array.from({ length: CATS_PER_PAGE }).map((_, idx) => {
                   const slot = visibleCategories[idx];
                   if (!slot) {
                     return (
                       <div
                         key={`empty-cat-${idx}`}
-                        className="border border-slate-500/60 bg-sky-100/60 min-h-[38px]"
+                        className="hidden sm:block border border-slate-500/60 bg-sky-100/60 min-h-[38px]"
                       />
                     );
                   }
@@ -1585,7 +1643,7 @@ export const PosModule: React.FC = () => {
                       key={slot.id}
                       type="button"
                       onClick={() => setSelectedCat(slot.id)}
-                      className={`border border-slate-700/75 px-1.5 py-2 text-[11px] font-extrabold truncate transition-colors min-h-[38px] ${
+                      className={`border border-slate-700/75 px-1.5 py-2 text-[11px] font-extrabold truncate transition-colors min-h-[40px] ${
                         active
                           ? 'bg-slate-900 text-amber-300'
                           : 'bg-sky-200/85 text-slate-950 hover:bg-sky-300'
@@ -1598,14 +1656,37 @@ export const PosModule: React.FC = () => {
                 })}
               </div>
             </div>
+
+            {/* Sticky Bottom Checkout CTA Bar on Phone/Portrait Tablet when Cart has items */}
+            {cart.length > 0 && (
+              <div className="lg:hidden sticky bottom-2 z-20 flex items-center justify-between gap-2 rounded-xl border-2 border-slate-950 bg-lime-500 px-3 py-2 text-slate-950 shadow-lg">
+                <div className="leading-tight">
+                  <div className="text-[11px] font-extrabold">
+                    {t(lang, `${cart.length} منتج في السلة`, `${cart.length} article(s)`)}
+                  </div>
+                  <div className="font-mono text-base font-black tabular-nums">
+                    {grandTotal.toFixed(2)} <span className="text-xs">{cur}</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setMobilePane('cart')}
+                  className="inline-flex min-h-[42px] items-center gap-1.5 rounded-lg bg-[#0B274D] px-4 py-2 text-xs font-extrabold text-[#FDE68A] shadow-sm active:scale-[0.98]"
+                >
+                  <span>{t(lang, 'إتمام البيع والدفع', 'Passer en caisse')}</span>
+                  <ArrowRight className={`h-4 w-4 ${lang === 'ar' ? 'rotate-180' : ''}`} />
+                </button>
+              </div>
+            )}
           </div>
         </div>
+        </>
       ) : (
         /* 6.1 SALES INVOICES LOG (Preserved 100%) */
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3">
-            <div className="flex flex-wrap items-center gap-2 flex-1">
-              <div className="relative min-w-[200px] flex-1">
+            <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
+              <div className="relative w-full sm:flex-1 sm:min-w-[200px]">
                 <Search className="pointer-events-none absolute top-2.5 start-3 h-4 w-4 text-slate-400" />
                 <input
                   value={logSearch}

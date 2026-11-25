@@ -635,7 +635,7 @@ export const InventoryModule: React.FC<InventoryModuleProps> = ({
   const renderBlankRows = (currentCount: number, colCount: number) => {
     const emptyCount = Math.max(0, MIN_SHEET_ROWS - currentCount);
     return Array.from({ length: emptyCount }).map((_, idx) => (
-      <tr key={`blank-${idx}`} className="h-[31px] bg-white">
+      <tr key={`blank-${idx}`} className={`h-[31px] bg-white ${idx >= 3 ? 'hidden sm:table-row' : ''}`}>
         {Array.from({ length: colCount }).map((__, colIdx) => (
           <td key={colIdx} className="border border-slate-800/80 px-2 py-1" />
         ))}
@@ -674,10 +674,10 @@ export const InventoryModule: React.FC<InventoryModuleProps> = ({
         </div>
       )}
 
-      {/* Search + Quick Date Period Buttons + Date Range Row (Matching Mockup 1-to-1) */}
+      {/* Search + Quick Date Period Buttons + Date Range Row */}
       <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 bg-white px-2 py-2 rounded-lg border border-slate-200 shadow-xs">
         {/* Search Input (Right in RTL) */}
-        <div className="relative flex-1 min-w-[210px]">
+        <div className="relative w-full sm:flex-1 sm:min-w-[200px]">
           <Search className="pointer-events-none absolute top-1/2 -translate-y-1/2 start-3 h-4 w-4 text-slate-500" />
           <input
             type="text"
@@ -701,7 +701,7 @@ export const InventoryModule: React.FC<InventoryModuleProps> = ({
         {/* Period Filter Buttons & Date Pickers (for sold_log, sold_stock, purchased_log, movements) */}
         {showDatePeriodControls ? (
           <>
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex flex-nowrap sm:flex-wrap items-center gap-1.5 overflow-x-auto no-scrollbar w-full sm:w-auto pb-0.5 sm:pb-0">
               {QUICK_PERIODS.map((p) => {
                 const isActive = activePeriod === p.id;
                 return (
@@ -709,7 +709,7 @@ export const InventoryModule: React.FC<InventoryModuleProps> = ({
                     key={p.id}
                     type="button"
                     onClick={() => handleSelectQuickPeriod(p.id)}
-                    className={`rounded-lg border-[1.5px] px-2.5 sm:px-3.5 py-2 text-xs sm:text-[13px] font-bold transition-colors whitespace-nowrap shrink-0 ${
+                    className={`min-h-[36px] rounded-lg border-[1.5px] px-2.5 sm:px-3.5 py-1.5 sm:py-2 text-xs sm:text-[13px] font-bold transition-colors whitespace-nowrap shrink-0 ${
                       isActive
                         ? 'border-[#0B274D] bg-[#FCE08B] text-slate-950 shadow-xs'
                         : 'border-slate-900 bg-white text-slate-900 hover:bg-slate-100'
@@ -721,38 +721,40 @@ export const InventoryModule: React.FC<InventoryModuleProps> = ({
               })}
             </div>
 
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="grid grid-cols-2 sm:flex sm:items-center gap-1.5 w-full sm:w-auto shrink-0">
               <input
                 type="date"
                 value={dateFrom}
                 onChange={(e) => handleManualDateFrom(e.target.value)}
                 title={t(lang, 'من تاريخ', 'Du')}
-                className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
+                className="w-full sm:w-auto rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
               />
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(e) => handleManualDateTo(e.target.value)}
-                title={t(lang, 'إلى تاريخ', 'Au')}
-                className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
-              />
-              {(dateFrom || dateTo) && (
-                <button
-                  type="button"
-                  onClick={clearDateFilter}
-                  title={t(lang, 'عرض كل الفترات', 'Toutes les dates')}
-                  className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200 transition-colors"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                </button>
-              )}
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="date"
+                  value={dateTo}
+                  onChange={(e) => handleManualDateTo(e.target.value)}
+                  title={t(lang, 'إلى تاريخ', 'Au')}
+                  className="w-full sm:w-auto flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
+                />
+                {(dateFrom || dateTo) && (
+                  <button
+                    type="button"
+                    onClick={clearDateFilter}
+                    title={t(lang, 'عرض كل الفترات', 'Toutes les dates')}
+                    className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200 transition-colors shrink-0"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
           </>
         ) : null}
 
-        {/* Remaining Stock Status Filter Buttons (matching the same crisp bordered style) */}
+        {/* Remaining Stock Status Filter Buttons */}
         {activeTab === 'remaining' && (
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-nowrap sm:flex-wrap items-center gap-1.5 overflow-x-auto no-scrollbar w-full sm:w-auto pb-0.5 sm:pb-0">
             {(
               [
                 { id: 'all', ar: `الكل (${products.length})`, fr: `Tout (${products.length})` },
@@ -769,7 +771,7 @@ export const InventoryModule: React.FC<InventoryModuleProps> = ({
                   key={f.id}
                   type="button"
                   onClick={() => setStockFilter(f.id)}
-                  className={`rounded-lg border-[1.5px] px-2.5 sm:px-3 py-2 text-xs font-bold transition-colors whitespace-nowrap shrink-0 ${
+                  className={`min-h-[36px] rounded-lg border-[1.5px] px-2.5 sm:px-3 py-1.5 sm:py-2 text-xs font-bold transition-colors whitespace-nowrap shrink-0 ${
                     isActive
                       ? 'border-[#0B274D] bg-[#FCE08B] text-slate-950 shadow-xs'
                       : 'border-slate-900 bg-white text-slate-900 hover:bg-slate-100'

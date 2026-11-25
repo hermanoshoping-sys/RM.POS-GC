@@ -125,9 +125,9 @@ export const HomeLauncher: React.FC = () => {
   };
 
   return (
-    <div className="mx-auto w-full max-w-[1280px] py-3 sm:py-6 lg:py-8">
-      {/* 4 x 3 Color-Coded Illustrated Launcher Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 sm:gap-5 lg:gap-6">
+    <div className="mx-auto w-full max-w-[1280px] py-1 sm:py-5 lg:py-8">
+      {/* 2-col Phone / 3-col Tablet / 4-col Desktop Color-Coded Illustrated Launcher Grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4 md:gap-5 lg:gap-6">
         {NAV_SECTIONS.map((item) => {
           const Icon = TILE_ICONS[item.id] ?? LayoutDashboard;
           const theme = getNavTileTheme(item.id);
@@ -149,30 +149,30 @@ export const HomeLauncher: React.FC = () => {
                   ? label
                   : t(lang, 'ليس لديك صلاحية فتح هذا القسم', 'Accès non autorisé pour ce profil')
               }
-              className={`group relative flex flex-col items-center justify-center gap-3 rounded-[24px] border ${theme.borderColor} bg-gradient-to-b ${theme.cardGradient} px-4 py-5 sm:py-6 text-center text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.32),0_10px_22px_-8px_rgba(15,23,42,0.32)] transition-all duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+              className={`group relative flex flex-col items-center justify-center gap-2 sm:gap-3 rounded-2xl sm:rounded-[24px] border ${theme.borderColor} bg-gradient-to-b ${theme.cardGradient} px-2.5 py-3.5 sm:px-4 sm:py-5 lg:py-6 text-center text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.32),0_10px_22px_-8px_rgba(15,23,42,0.32)] transition-all duration-150 ease-[cubic-bezier(0.16,1,0.3,1)] ${
                 allowed
                   ? `hover:-translate-y-1 hover:brightness-105 hover:ring-2 ${theme.hoverRing} hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.42),0_18px_30px_-10px_rgba(15,23,42,0.42)] active:translate-y-0 active:scale-[0.985]`
                   : 'opacity-45 grayscale cursor-not-allowed'
               } focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#E5B84B]`}
             >
               {!allowed && (
-                <span className="absolute top-3 end-3 inline-flex items-center gap-1 rounded-full bg-slate-950/75 px-2 py-1 text-[10px] font-bold text-amber-300">
+                <span className="absolute top-2 end-2 sm:top-3 sm:end-3 inline-flex items-center gap-1 rounded-full bg-slate-950/75 px-1.5 sm:px-2 py-0.5 sm:py-1 text-[9px] sm:text-[10px] font-bold text-amber-300">
                   <Lock className="h-3 w-3" />
-                  {t(lang, 'مقفل', 'Verrouillé')}
+                  <span className="hidden sm:inline">{t(lang, 'مقفل', 'Verrouillé')}</span>
                 </span>
               )}
 
               {allowed &&
                 (item.id === 'customers' || item.id === 'payments') &&
                 liveStats.overdueInstallmentsCount > 0 && (
-                  <span className="absolute top-3 end-3 inline-flex items-center rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-extrabold text-white shadow">
+                  <span className="absolute top-2 end-2 sm:top-3 sm:end-3 inline-flex items-center rounded-full bg-red-600 px-1.5 sm:px-2 py-0.5 text-[9px] sm:text-[10px] font-extrabold text-white shadow">
                     {liveStats.overdueInstallmentsCount}{' '}
                     {t(lang, 'متأخر', 'retard')}
                   </span>
                 )}
 
               {/* Custom 3D Isometric Tile Artwork with Guaranteed Icon Fallback */}
-              <div className="relative h-24 w-24 sm:h-28 sm:w-28 overflow-hidden rounded-2xl bg-white/95 shadow-md ring-2 ring-white/35 transition-transform duration-150 group-hover:scale-105">
+              <div className="relative h-16 w-16 sm:h-24 sm:w-24 lg:h-28 lg:w-28 overflow-hidden rounded-xl sm:rounded-2xl bg-white/95 shadow-md ring-2 ring-white/35 transition-transform duration-150 group-hover:scale-105">
                 {!imageFailed ? (
                   <img
                     src={theme.imageUrl}
@@ -185,17 +185,17 @@ export const HomeLauncher: React.FC = () => {
                   />
                 ) : (
                   <div className="flex h-full w-full items-center justify-center bg-white/15">
-                    <Icon className="h-10 w-10 text-slate-700" />
+                    <Icon className="h-8 w-8 sm:h-10 sm:w-10 text-slate-700" />
                   </div>
                 )}
               </div>
 
               {/* Bold Tile Title & Live Contextual Counter */}
-              <div className="space-y-0.5 max-w-full">
-                <div className="text-base sm:text-lg font-extrabold tracking-tight text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.28)] truncate">
+              <div className="space-y-0.5 w-full min-w-0">
+                <div className="text-sm sm:text-base lg:text-lg font-extrabold tracking-tight text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.28)] truncate">
                   {label}
                 </div>
-                <div className={`text-[11px] sm:text-xs font-medium ${theme.subtitleTint} tabular-nums truncate max-w-[210px]`}>
+                <div className={`text-[10px] sm:text-xs font-medium ${theme.subtitleTint} tabular-nums truncate w-full`}>
                   {subtitle}
                 </div>
               </div>

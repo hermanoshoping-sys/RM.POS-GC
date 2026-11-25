@@ -324,7 +324,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
   const renderBlankRows = (currentCount: number, colCount: number, minRows = MIN_SHEET_ROWS) => {
     const emptyCount = Math.max(0, minRows - currentCount);
     return Array.from({ length: emptyCount }).map((_, idx) => (
-      <tr key={`blank-${idx}`} className="h-[30px] bg-white">
+      <tr key={`blank-${idx}`} className={`h-[30px] bg-white ${idx >= 3 ? 'hidden sm:table-row' : ''}`}>
         {Array.from({ length: colCount }).map((__, colIdx) => (
           <td key={colIdx} className="border border-slate-800/80 px-2 py-1" />
         ))}
@@ -361,56 +361,62 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
         </div>
       )}
 
-      {/* Unified Filter & Quick Shortcuts Bar (Exact Inventory Style) */}
+      {/* Unified Filter & Quick Shortcuts Bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 bg-white px-2 py-2 rounded-lg border border-slate-200 shadow-xs">
-        <div className="flex flex-wrap items-center gap-1.5">
-          {QUICK_PERIODS.map((p) => {
-            const isActive = activePeriod === p.id;
-            return (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => handleSelectQuickPeriod(p.id)}
-                className={`rounded-lg border-[1.5px] px-2.5 sm:px-3.5 py-2 text-xs font-bold transition-colors whitespace-nowrap shrink-0 ${
-                  isActive
-                    ? 'border-[#0B274D] bg-[#FCE08B] text-slate-950 shadow-xs'
-                    : 'border-slate-900 bg-white text-slate-900 hover:bg-slate-100'
-                }`}
-              >
-                {lang === 'ar' ? p.ar : p.fr}
-              </button>
-            );
-          })}
+        <div className="flex flex-wrap items-center gap-1.5 w-full lg:w-auto">
+          <div className="flex flex-nowrap sm:flex-wrap items-center gap-1.5 overflow-x-auto no-scrollbar w-full sm:w-auto pb-0.5 sm:pb-0">
+            {QUICK_PERIODS.map((p) => {
+              const isActive = activePeriod === p.id;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => handleSelectQuickPeriod(p.id)}
+                  className={`min-h-[36px] rounded-lg border-[1.5px] px-2.5 sm:px-3.5 py-1.5 sm:py-2 text-xs font-bold transition-colors whitespace-nowrap shrink-0 ${
+                    isActive
+                      ? 'border-[#0B274D] bg-[#FCE08B] text-slate-950 shadow-xs'
+                      : 'border-slate-900 bg-white text-slate-900 hover:bg-slate-100'
+                  }`}
+                >
+                  {lang === 'ar' ? p.ar : p.fr}
+                </button>
+              );
+            })}
+          </div>
 
-          <input
-            type="date"
-            value={dateFrom}
-            onChange={(e) => handleManualDateFrom(e.target.value)}
-            className="rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
-          />
-          <input
-            type="date"
-            value={dateTo}
-            onChange={(e) => handleManualDateTo(e.target.value)}
-            className="rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
-          />
-          {(dateFrom || dateTo) && (
-            <button
-              type="button"
-              onClick={clearDateFilter}
-              title={t(lang, 'عرض كل الفترات', 'Toutes les dates')}
-              className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-            </button>
-          )}
+          <div className="grid grid-cols-2 sm:flex sm:items-center gap-1.5 w-full sm:w-auto">
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => handleManualDateFrom(e.target.value)}
+              className="w-full sm:w-auto rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
+            />
+            <div className="flex items-center gap-1.5">
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => handleManualDateTo(e.target.value)}
+                className="w-full sm:w-auto flex-1 rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs font-mono tabular-nums text-slate-800 focus:border-slate-900 focus:outline-none"
+              />
+              {(dateFrom || dateTo) && (
+                <button
+                  type="button"
+                  onClick={clearDateFilter}
+                  title={t(lang, 'عرض كل الفترات', 'Toutes les dates')}
+                  className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200 shrink-0"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
         </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="grid grid-cols-2 sm:flex sm:items-center gap-1.5 w-full sm:w-auto shrink-0">
           <button
             type="button"
             onClick={() => setActiveSection('pos')}
-            className="inline-flex items-center gap-1.5 rounded-lg border-[1.5px] border-teal-900 bg-teal-700 px-3 py-2 text-xs font-extrabold text-white hover:bg-teal-800 whitespace-nowrap"
+            className="inline-flex min-h-[38px] items-center justify-center gap-1.5 rounded-lg border-[1.5px] border-teal-900 bg-teal-700 px-3 py-2 text-xs font-extrabold text-white hover:bg-teal-800 whitespace-nowrap"
           >
             <ShoppingCart className="h-3.5 w-3.5" />
             {t(lang, 'نقطة البيع', 'POS')}
@@ -418,7 +424,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
           <button
             type="button"
             onClick={() => setActiveSection('purchases')}
-            className="inline-flex items-center gap-1.5 rounded-lg border-[1.5px] border-slate-900 bg-white px-3 py-2 text-xs font-extrabold text-slate-900 hover:bg-amber-50 whitespace-nowrap"
+            className="inline-flex min-h-[38px] items-center justify-center gap-1.5 rounded-lg border-[1.5px] border-slate-900 bg-white px-3 py-2 text-xs font-extrabold text-slate-900 hover:bg-amber-50 whitespace-nowrap"
           >
             <Truck className="h-3.5 w-3.5 text-[#0B274D]" />
             {t(lang, 'فاتورة مشتريات', 'Nouvel achat')}

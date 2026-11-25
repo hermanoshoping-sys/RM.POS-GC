@@ -165,8 +165,8 @@ export const LockScreen: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/95 p-4">
-      <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-7 shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/95 p-3 sm:p-4 overflow-y-auto">
+      <div className="my-auto w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 sm:p-7 shadow-2xl">
         <div className="flex flex-col items-center text-center">
           <img
             src="/assets/aistudio/image_39bba8ff.png"

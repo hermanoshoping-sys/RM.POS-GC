@@ -49,6 +49,7 @@ export const PurchasesModule: React.FC = () => {
   const cur = settings.storeInfo.currency || 'MAD';
 
   const [activeTab, setActiveTab] = useState<'new' | 'log' | 'returns'>('new');
+  const [mobilePane, setMobilePane] = useState<'catalog' | 'cart'>('catalog');
   const [now, setNow] = useState<Date>(() => new Date());
 
   useEffect(() => {
@@ -425,28 +426,28 @@ export const PurchasesModule: React.FC = () => {
   });
 
   return (
-    <div className="space-y-3">
-      {/* TOP AMBER/GOLD BAR (Matching blueprint image, tailored for Purchases) */}
-      <div className="rounded-xl border-2 border-amber-400 bg-amber-300 px-3 py-2 shadow-sm text-slate-950">
-        <div className="flex flex-wrap items-center justify-between gap-2.5">
+    <div className="space-y-2.5 sm:space-y-3">
+      {/* TOP AMBER/GOLD BAR (Responsive for Phone, Tablet & Desktop) */}
+      <div className="rounded-xl border-2 border-amber-400 bg-amber-300 px-2.5 sm:px-3 py-2 shadow-sm text-slate-950">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           {/* Start (Right in RTL): Back Button + Supplier Selector */}
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-1 sm:flex-initial items-center gap-1.5 sm:gap-2 min-w-0">
             <button
               type="button"
               onClick={() => setActiveSection('home')}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-600/40 bg-amber-200/80 px-3 py-1.5 text-xs font-extrabold text-slate-950 hover:bg-white transition-colors"
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-amber-600/40 bg-amber-200/80 px-2.5 sm:px-3 py-1.5 text-xs font-extrabold text-slate-950 hover:bg-white transition-colors shrink-0"
             >
               <ArrowRight className={`h-4 w-4 ${lang === 'fr' ? 'rotate-180' : ''}`} />
               <span>{t(lang, 'الرجوع', 'Retour')}</span>
             </button>
 
-            <div className="flex items-center gap-1.5 rounded-lg border border-amber-600/40 bg-white/90 px-2.5 py-1">
+            <div className="flex flex-1 sm:flex-initial min-w-0 items-center gap-1.5 rounded-lg border border-amber-600/40 bg-white/90 px-2 py-1.5">
               <Truck className="h-4 w-4 text-amber-800 shrink-0" />
               <select
                 value={supplierId}
                 onChange={(e) => setSupplierId(Number(e.target.value))}
                 aria-label={t(lang, 'اختيار المورد', 'Choisir le fournisseur')}
-                className="bg-transparent text-xs font-bold text-slate-900 focus:outline-none max-w-[180px] sm:max-w-[230px]"
+                className="w-full min-w-0 bg-transparent text-xs font-bold text-slate-900 focus:outline-none sm:max-w-[200px] lg:max-w-[230px]"
               >
                 {suppliers.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -457,9 +458,9 @@ export const PurchasesModule: React.FC = () => {
             </div>
           </div>
 
-          {/* Center: Logo + Program Name + Sub-tabs (7. / 7.1 / 7.2) */}
-          <div className="flex flex-wrap items-center justify-center gap-2.5">
-            <div className="flex items-center gap-2">
+          {/* Center: Logo (md+) + Sub-tabs (7. / 7.1 / 7.2) */}
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <div className="hidden md:flex items-center gap-2">
               <img
                 src="/assets/aistudio/image_39bba8ff.png"
                 alt="RM.POS GC"
@@ -469,7 +470,7 @@ export const PurchasesModule: React.FC = () => {
                 <div className="flex items-center gap-1.5 text-sm font-black tracking-tight text-slate-950">
                   <span dir="ltr">RM.POS GC</span>
                   <span className="text-amber-900/50">·</span>
-                  <span className="truncate max-w-[160px]">{settings.storeInfo.storeName}</span>
+                  <span className="truncate max-w-[140px] lg:max-w-[160px]">{settings.storeInfo.storeName}</span>
                 </div>
                 <div className="text-[10px] font-bold text-amber-950/75">
                   {t(lang, 'نقطة المشتريات والاستلام — Achats', 'Réception & Achats Fournisseurs')}
@@ -477,11 +478,11 @@ export const PurchasesModule: React.FC = () => {
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-1 rounded-lg bg-amber-400/70 p-0.5 border border-amber-500/50">
+            <div className="flex items-center gap-1 rounded-lg bg-amber-400/70 p-0.5 border border-amber-500/50 overflow-x-auto no-scrollbar max-w-full">
               <button
                 type="button"
                 onClick={() => setActiveTab('new')}
-                className={`rounded-md px-2.5 py-1 text-[11px] font-bold whitespace-nowrap ${
+                className={`min-h-[34px] rounded-md px-2.5 py-1 text-[11px] font-bold whitespace-nowrap shrink-0 ${
                   activeTab === 'new'
                     ? 'bg-slate-950 text-amber-300 shadow-sm'
                     : 'text-slate-900 hover:bg-amber-200/70'
@@ -492,7 +493,7 @@ export const PurchasesModule: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setActiveTab('log')}
-                className={`rounded-md px-2.5 py-1 text-[11px] font-bold whitespace-nowrap ${
+                className={`min-h-[34px] rounded-md px-2.5 py-1 text-[11px] font-bold whitespace-nowrap shrink-0 ${
                   activeTab === 'log'
                     ? 'bg-slate-950 text-amber-300 shadow-sm'
                     : 'text-slate-900 hover:bg-amber-200/70'
@@ -503,7 +504,7 @@ export const PurchasesModule: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setActiveTab('returns')}
-                className={`rounded-md px-2.5 py-1 text-[11px] font-bold whitespace-nowrap ${
+                className={`min-h-[34px] rounded-md px-2.5 py-1 text-[11px] font-bold whitespace-nowrap shrink-0 ${
                   activeTab === 'returns'
                     ? 'bg-slate-950 text-amber-300 shadow-sm'
                     : 'text-slate-900 hover:bg-amber-200/70'
@@ -515,21 +516,52 @@ export const PurchasesModule: React.FC = () => {
           </div>
 
           {/* End (Left in RTL): Live Date & Time */}
-          <div className="rounded-lg border border-amber-600/40 bg-amber-200/75 px-3 py-1 text-center font-mono leading-tight tabular-nums">
+          <div className="hidden sm:block rounded-lg border border-amber-600/40 bg-amber-200/75 px-2.5 py-1 text-center font-mono leading-tight tabular-nums">
             <div className="text-xs font-extrabold text-slate-950">{liveTimeStr}</div>
             <div className="text-[10px] font-semibold text-slate-800">{liveDateStr}</div>
           </div>
         </div>
       </div>
 
-      {/* TAB 7: NEW PURCHASE TERMINAL (Matching blueprint tailored for Purchases) */}
+      {/* TAB 7: NEW PURCHASE TERMINAL */}
       {activeTab === 'new' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5 items-stretch">
-          {/* RIGHT PANEL IN RTL (5 cols): Purchase Lines Table + Barcode/Camera + TOTALE + Keypad & Purchase Actions */}
-          <div className="lg:col-span-5 flex flex-col gap-2">
-            {/* 1. Purchase Cart Table (Qte | article | P.A | total) */}
-            <div className="rounded-xl border-2 border-slate-800 bg-white overflow-hidden shadow-sm">
-              <div className="h-[250px] lg:h-[295px] overflow-y-auto">
+        <>
+          {/* Phone & Portrait Tablet Mode Switcher */}
+          <div className="lg:hidden grid grid-cols-2 gap-1.5 rounded-xl border-2 border-slate-900 bg-white p-1 shadow-xs">
+            <button
+              type="button"
+              onClick={() => setMobilePane('catalog')}
+              className={`min-h-[42px] flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-extrabold transition-colors ${
+                mobilePane === 'catalog'
+                  ? 'bg-[#0B274D] text-[#FDE68A] shadow-sm'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              <Package className="h-4 w-4 shrink-0" />
+              <span>{t(lang, `المنتجات (${filteredProducts.length})`, `Produits (${filteredProducts.length})`)}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setMobilePane('cart')}
+              className={`min-h-[42px] flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-extrabold transition-colors ${
+                mobilePane === 'cart'
+                  ? 'bg-lime-500 text-slate-950 border border-slate-900 shadow-sm'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              <Truck className="h-4 w-4 shrink-0" />
+              <span className="truncate font-mono tabular-nums">
+                {t(lang, 'فاتورة الشراء', 'Bon achat')} ({items.length}) · {total.toFixed(2)}
+              </span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5 items-stretch">
+            {/* RIGHT PANEL IN RTL (5 cols): Purchase Lines Table + Barcode/Camera + TOTALE + Keypad & Purchase Actions */}
+            <div className={`${mobilePane === 'cart' ? 'flex' : 'hidden'} lg:flex lg:col-span-5 flex-col gap-2`}>
+              {/* 1. Purchase Cart Table (Qte | article | P.A | total) */}
+              <div className="rounded-xl border-2 border-slate-800 bg-white overflow-hidden shadow-sm">
+                <div className="h-[220px] sm:h-[260px] lg:h-[295px] overflow-y-auto">
                 <table className="w-full border-collapse text-xs">
                   <thead className="sticky top-0 z-10 bg-slate-100 text-slate-900">
                     <tr className="border-b-2 border-slate-800">
@@ -687,9 +719,9 @@ export const PurchasesModule: React.FC = () => {
             </div>
 
             {/* 4. Bottom Split: Purchase Action Stack (Right in RTL) + Numeric Keypad (Left in RTL) */}
-            <div className="grid grid-cols-12 gap-1.5 items-stretch">
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-1.5 items-stretch">
               {/* Purchase-Specific Action Stack */}
-              <div className="col-span-6 flex flex-col gap-1">
+              <div className="sm:col-span-6 flex flex-col gap-1.5 sm:gap-1">
                 {/* Yellow: Toggle Costing Method (CMUP / Last Cost) */}
                 <button
                   type="button"
@@ -827,7 +859,7 @@ export const PurchasesModule: React.FC = () => {
               </div>
 
               {/* Numeric Keypad with Purchase-Specific Modes (Qte | P.A | Payé | Rem) */}
-              <div className="col-span-6 flex flex-col gap-1">
+              <div className="sm:col-span-6 flex flex-col gap-1">
                 <div className="grid grid-cols-4 gap-0.5 rounded-md border border-slate-800 bg-slate-100 p-0.5 text-[10px] font-bold">
                   <button
                     type="button"
@@ -911,7 +943,40 @@ export const PurchasesModule: React.FC = () => {
           </div>
 
           {/* LEFT PANEL IN RTL (7 cols): Product Purchase Grid + 2x6 Light Blue Categories Bar */}
-          <div className="lg:col-span-7 flex flex-col gap-2">
+          <div className={`${mobilePane === 'catalog' ? 'flex' : 'hidden'} lg:flex lg:col-span-7 flex-col gap-2`}>
+            {/* Mobile Quick Barcode / Name Search Bar when viewing Catalog on <lg */}
+            <div className="flex lg:hidden items-stretch gap-1.5">
+              <div className="relative flex-1">
+                <ScanBarcode className="pointer-events-none absolute top-1/2 -translate-y-1/2 start-3 h-4 w-4 text-slate-500" />
+                <input
+                  type="text"
+                  value={barcodeInput}
+                  onChange={(e) => setBarcodeInput(e.target.value)}
+                  onKeyDown={handleBarcodeEnter}
+                  placeholder={t(lang, 'باركود سريع (Enter)...', 'Code-barres rapide...')}
+                  className="w-full rounded-lg border-2 border-slate-800 bg-white py-2 ps-9 pe-3 text-xs font-bold text-slate-900 placeholder:text-slate-500 focus:border-teal-700 focus:outline-none"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCameraScanner(true)}
+                className="inline-flex min-h-[40px] items-center justify-center rounded-lg border-2 border-slate-900 bg-teal-700 px-3 text-xs font-bold text-white shrink-0"
+              >
+                <Camera className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowNameSearchModal(true);
+                  window.setTimeout(() => nameSearchInputRef.current?.focus(), 80);
+                }}
+                className="inline-flex min-h-[40px] items-center justify-center gap-1 rounded-lg border-2 border-slate-900 bg-lime-500 px-3 text-xs font-extrabold text-slate-950 shrink-0"
+              >
+                <Search className="h-4 w-4" />
+                <span>{t(lang, 'بحث', 'Chercher')}</span>
+              </button>
+            </div>
+
             {nameSearch && (
               <div className="flex items-center justify-between gap-2 rounded-lg border border-teal-300 bg-teal-50 px-3 py-1.5 text-xs">
                 <div className="flex items-center gap-2 font-semibold text-teal-900">
@@ -932,7 +997,7 @@ export const PurchasesModule: React.FC = () => {
             )}
 
             {/* Dense Peach Product Cards (Showing Purchase Price & Low Stock Alert) */}
-            <div className="flex-1 rounded-xl border-2 border-slate-800 bg-orange-50/40 p-1.5 overflow-y-auto max-h-[54vh] lg:max-h-[540px]">
+            <div className="flex-1 rounded-xl border-2 border-slate-800 bg-orange-50/40 p-1.5 overflow-y-auto max-h-[54dvh] sm:max-h-[58dvh] lg:max-h-[540px]">
               {filteredProducts.length === 0 ? (
                 <div className="flex h-64 flex-col items-center justify-center gap-2 text-slate-500 text-xs">
                   <Package className="h-8 w-8 text-slate-400" />
@@ -1028,14 +1093,14 @@ export const PurchasesModule: React.FC = () => {
                 </button>
               </div>
 
-              <div className="flex-1 grid grid-cols-3 sm:grid-cols-6 grid-rows-2 border-2 border-slate-800 rounded-md overflow-hidden bg-sky-100">
+              <div className="flex-1 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 border-2 border-slate-800 rounded-md overflow-hidden bg-sky-100">
                 {Array.from({ length: CATS_PER_PAGE }).map((_, idx) => {
                   const slot = visibleCategories[idx];
                   if (!slot) {
                     return (
                       <div
                         key={`empty-pcat-${idx}`}
-                        className="border border-slate-500/60 bg-sky-100/60 min-h-[38px]"
+                        className="hidden sm:block border border-slate-500/60 bg-sky-100/60 min-h-[38px]"
                       />
                     );
                   }
@@ -1045,7 +1110,7 @@ export const PurchasesModule: React.FC = () => {
                       key={slot.id}
                       type="button"
                       onClick={() => setSelectedCat(slot.id)}
-                      className={`border border-slate-700/75 px-1.5 py-2 text-[11px] font-extrabold truncate transition-colors min-h-[38px] ${
+                      className={`border border-slate-700/75 px-1.5 py-2 text-[11px] font-extrabold truncate transition-colors min-h-[40px] ${
                         active
                           ? 'bg-slate-900 text-amber-300'
                           : 'bg-sky-200/85 text-slate-950 hover:bg-sky-300'
@@ -1058,16 +1123,39 @@ export const PurchasesModule: React.FC = () => {
                 })}
               </div>
             </div>
+
+            {/* Sticky Bottom Purchase Summary Bar on Phone/Portrait Tablet */}
+            {items.length > 0 && (
+              <div className="lg:hidden sticky bottom-2 z-20 flex items-center justify-between gap-2 rounded-xl border-2 border-slate-950 bg-lime-500 px-3 py-2 text-slate-950 shadow-lg">
+                <div className="leading-tight">
+                  <div className="text-[11px] font-extrabold">
+                    {t(lang, `${items.length} صنف في فاتورة الشراء`, `${items.length} ligne(s)`)}
+                  </div>
+                  <div className="font-mono text-base font-black tabular-nums">
+                    {total.toFixed(2)} <span className="text-xs">{cur}</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setMobilePane('cart')}
+                  className="inline-flex min-h-[42px] items-center gap-1.5 rounded-lg bg-[#0B274D] px-4 py-2 text-xs font-extrabold text-[#FDE68A] shadow-sm active:scale-[0.98]"
+                >
+                  <span>{t(lang, 'مراجعة وحفظ الشراء', 'Finaliser achat')}</span>
+                  <ArrowRight className={`h-4 w-4 ${lang === 'ar' ? 'rotate-180' : ''}`} />
+                </button>
+              </div>
+            )}
           </div>
         </div>
+        </>
       )}
 
       {/* TAB 7.1: PURCHASE INVOICES LOG (Preserved 100%) */}
       {activeTab === 'log' && (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3">
-            <div className="flex flex-wrap items-center gap-2 flex-1">
-              <div className="relative flex-1 min-w-[200px]">
+            <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
+              <div className="relative w-full sm:flex-1 sm:min-w-[200px]">
                 <Search className="pointer-events-none absolute top-2.5 start-3 h-4 w-4 text-slate-400" />
                 <input
                   value={logSearch}

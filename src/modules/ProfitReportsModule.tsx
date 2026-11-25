@@ -320,7 +320,7 @@ export const ProfitReportsModule: React.FC<{ embedded?: boolean }> = ({ embedded
       {/* Unified Crisp Toolbar: Search + 6 Quick Date Period Buttons + Date Range */}
       <div className="flex flex-wrap items-center gap-2 bg-white px-2.5 py-2 border-[1.5px] border-slate-900 rounded-lg shadow-xs">
         {/* Search Input */}
-        <div className="relative flex-1 min-w-[200px]">
+        <div className="relative w-full sm:flex-1 sm:min-w-[200px]">
           <Search className="pointer-events-none absolute top-1/2 -translate-y-1/2 start-3 h-4 w-4 text-slate-500" />
           <input
             type="text"
@@ -331,12 +331,12 @@ export const ProfitReportsModule: React.FC<{ embedded?: boolean }> = ({ embedded
               'بحث بالمنتج أو العائلة أو الفاتورة أو البائع...',
               'Rechercher produit, famille, facture, vendeur...'
             )}
-            className="w-full h-10 rounded-lg border-[1.5px] border-slate-900 bg-white ps-9 pe-3 text-sm font-medium text-slate-900 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-400"
+            className="w-full h-10 rounded-lg border-[1.5px] border-slate-900 bg-white ps-9 pe-3 text-xs sm:text-sm font-medium text-slate-900 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-400"
           />
         </div>
 
         {/* 6 Quick Date Period Buttons */}
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-nowrap sm:flex-wrap items-center gap-1.5 overflow-x-auto no-scrollbar w-full sm:w-auto pb-0.5 sm:pb-0">
           {QUICK_PERIODS.map((p) => {
             const isActive = activePeriod === p.id;
             return (
@@ -344,7 +344,7 @@ export const ProfitReportsModule: React.FC<{ embedded?: boolean }> = ({ embedded
                 key={p.id}
                 type="button"
                 onClick={() => handleSelectPeriod(p.id)}
-                className={`h-10 px-3 rounded-lg border-[1.5px] text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
+                className={`h-9 sm:h-10 px-3 rounded-lg border-[1.5px] text-xs sm:text-sm font-bold transition-colors whitespace-nowrap shrink-0 ${
                   isActive
                     ? 'border-[#0B274D] bg-[#0B274D] text-[#FDE68A]'
                     : 'border-slate-900 bg-white text-slate-900 hover:bg-amber-50'
@@ -357,7 +357,7 @@ export const ProfitReportsModule: React.FC<{ embedded?: boolean }> = ({ embedded
         </div>
 
         {/* Date Pickers + Reset */}
-        <div className="flex items-center gap-1.5">
+        <div className="grid grid-cols-2 sm:flex sm:items-center gap-1.5 w-full sm:w-auto">
           <input
             type="date"
             value={dateFrom}
@@ -366,28 +366,30 @@ export const ProfitReportsModule: React.FC<{ embedded?: boolean }> = ({ embedded
               setActivePeriod(null);
             }}
             aria-label={t(lang, 'من تاريخ', 'Date début')}
-            className="h-10 rounded-lg border-[1.5px] border-slate-300 bg-white px-2.5 font-mono text-xs font-medium text-slate-800 focus:border-slate-900 focus:outline-none"
+            className="w-full sm:w-auto h-10 rounded-lg border-[1.5px] border-slate-300 bg-white px-2.5 font-mono text-xs font-medium text-slate-800 focus:border-slate-900 focus:outline-none"
           />
-          <input
-            type="date"
-            value={dateTo}
-            onChange={(e) => {
-              setDateTo(e.target.value);
-              setActivePeriod(null);
-            }}
-            aria-label={t(lang, 'إلى تاريخ', 'Date fin')}
-            className="h-10 rounded-lg border-[1.5px] border-slate-300 bg-white px-2.5 font-mono text-xs font-medium text-slate-800 focus:border-slate-900 focus:outline-none"
-          />
-          {(dateFrom || dateTo || search) && (
-            <button
-              type="button"
-              onClick={handleResetFilters}
-              title={t(lang, 'إعادة ضبط الفلتر', 'Réinitialiser les filtres')}
-              className="h-10 w-10 inline-flex items-center justify-center rounded-lg border-[1.5px] border-slate-300 bg-white text-slate-700 hover:border-slate-900 hover:bg-slate-50"
-            >
-              <RotateCcw className="h-4 w-4" />
-            </button>
-          )}
+          <div className="flex items-center gap-1.5">
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => {
+                setDateTo(e.target.value);
+                setActivePeriod(null);
+              }}
+              aria-label={t(lang, 'إلى تاريخ', 'Date fin')}
+              className="w-full sm:w-auto flex-1 h-10 rounded-lg border-[1.5px] border-slate-300 bg-white px-2.5 font-mono text-xs font-medium text-slate-800 focus:border-slate-900 focus:outline-none"
+            />
+            {(dateFrom || dateTo || search) && (
+              <button
+                type="button"
+                onClick={handleResetFilters}
+                title={t(lang, 'إعادة ضبط الفلتر', 'Réinitialiser les filtres')}
+                className="h-10 w-10 inline-flex items-center justify-center rounded-lg border-[1.5px] border-slate-300 bg-white text-slate-700 hover:border-slate-900 hover:bg-slate-50 shrink-0"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </button>
+            )}
+          </div>
         </div>
       </div>
 

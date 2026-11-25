@@ -1,0 +1,453 @@
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db, ensureDatabaseInitialized, normalizeSettings } from '../db/database';
+import { createBackupRecord } from '../db/operations';
+import {
+  AppSettings,
+  AppUser,
+  Customer,
+  CustomerPayment,
+  Language,
+  Product,
+  PurchaseInvoice,
+  SaleInvoice,
+  SectionId,
+  Supplier,
+  SupplierPayment,
+  SupplierReturn,
+} from '../types';
+import { verifyPassword } from '../utils/crypto';
+import { canAccessSection } from '../utils/permissions';
+
+export type PrintableDocument =
+  | { type: 'sale_invoice'; invoice: SaleInvoice; format?: 'a4' | '80mm' | '58mm' }
+  | { type: 'purchase_invoice'; invoice: PurchaseInvoice; format?: 'a4' | '80mm' | '58mm' }
+  | { type: 'customer_payment'; payment: CustomerPayment; format?: 'a4' | '80mm' | '58mm' }
+  | { type: 'supplier_payment'; payment: SupplierPayment; format?: 'a4' | '80mm' | '58mm' }
+  | { type: 'supplier_return'; ret: SupplierReturn }
+  | {
+      type: 'customer_statement';
+      customer: Customer;
+      invoices: SaleInvoice[];
+      payments: CustomerPayment[];
+    }
+  | {
+      type: 'supplier_statement';
+      supplier: Supplier;
+      purchases: PurchaseInvoice[];
+      payments: SupplierPayment[];
+      returns: SupplierReturn[];
+    }
+  | { type: 'barcode_labels'; products: { product: Product; copies: number }[] }
+  | {
+      type: 'generic_report';
+      title: string;
+      subtitle: string;
+      columns: string[];
+      rows: (string | number)[][];
+      summaryItems?: { label: string; value: string }[];
+    };
+
+export interface ToastMessage {
+  id: number;
+  type: 'success' | 'error' | 'info' | 'warning';
+  message: string;
+}
+
+export interface StoragePersistenceInfo {
+  supported: boolean;
+  persisted: boolean;
+  usageBytes: number;
+  quotaBytes: number;
+}
+
+interface DeleteGuardRequest {
+  title: string;
+  description: string;
+  requirePassword: boolean;
+  onConfirm: () => Promise<void> | void;
+}
+
+interface AppContextValue {
+  ready: boolean;
+  lang: Language;
+  setLang: (lang: Language) => void;
+  activeSection: SectionId;
+  setActiveSection: (sec: SectionId) => void;
+  settings: AppSettings;
+  currentUser: AppUser | null;
+  setCurrentUser: (u: AppUser | null) => void;
+  isLocked: boolean;
+  setIsLocked: (locked: boolean) => void;
+  notify: (message: string, type?: ToastMessage['type']) => void;
+  toasts: ToastMessage[];
+  dismissToast: (id: number) => void;
+  printDoc: PrintableDocument | null;
+  openPrint: (doc: PrintableDocument) => void;
+  closePrint: () => void;
+  requestGuardedAction: (req: {
+    title: string;
+    description: string;
+    isSensitiveDelete?: boolean;
+    isFinancialConfirm?: boolean;
+    onConfirm: () => Promise<void> | void;
+  }) => void;
+  guardRequest: DeleteGuardRequest | null;
+  closeGuard: () => void;
+  verifyDeletePassword: (password: string) => Promise<boolean>;
+  storageInfo: StoragePersistenceInfo;
+  requestPersistentStorage: () => Promise<boolean>;
+  runAutoBackupNow: (silent?: boolean) => Promise<boolean>;
+}
+
+const AppContext = createContext<AppContextValue | null>(null);
+
+export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [ready, setReady] = useState(false);
+  const [lang, setLangState] = useState<Language>('ar');
+  const [activeSection, setActiveSectionState] = useState<SectionId>('home');
+  const [currentUser, setCurrentUserState] = useState<AppUser | null>(null);
+  const [isLocked, setIsLocked] = useState(false);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [printDoc, setPrintDoc] = useState<PrintableDocument | null>(null);
+  const [guardRequest, setGuardRequest] = useState<DeleteGuardRequest | null>(null);
+  const [storageInfo, setStorageInfo] = useState<StoragePersistenceInfo>({
+    supported: typeof navigator !== 'undefined' && Boolean(navigator.storage?.persist),
+    persisted: false,
+    usageBytes: 0,
+    quotaBytes: 0,
+  });
+
+  const idleTimerRef = useRef<number | null>(null);
+  const runningAutoBackupRef = useRef(false);
+
+  const liveSettings = useLiveQuery(() => db.settings.get(1), []);
+  const settings = React.useMemo(() => normalizeSettings(liveSettings), [liveSettings]);
+
+  const notify = useCallback((message: string, type: ToastMessage['type'] = 'success') => {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    setToasts((prev) => [...prev.slice(-3), { id, type, message }]);
+    window.setTimeout(() => {
+      setToasts((prev) => prev.filter((item) => item.id !== id));
+    }, 3800);
+  }, []);
+
+  const refreshStorageEstimate = useCallback(async () => {
+    if (typeof navigator === 'undefined' || !navigator.storage) return;
+    try {
+      const persisted = navigator.storage.persisted
+        ? await navigator.storage.persisted()
+        : false;
+      const estimate = navigator.storage.estimate ? await navigator.storage.estimate() : {};
+      setStorageInfo({
+        supported: Boolean(navigator.storage.persist),
+        persisted,
+        usageBytes: estimate.usage ?? 0,
+        quotaBytes: estimate.quota ?? 0,
+      });
+    } catch {
+      // Ignore browser storage estimation restrictions
+    }
+  }, []);
+
+  const requestPersistentStorage = useCallback(async (): Promise<boolean> => {
+    if (typeof navigator === 'undefined' || !navigator.storage?.persist) {
+      return false;
+    }
+    try {
+      const granted = await navigator.storage.persist();
+      await refreshStorageEstimate();
+      return granted;
+    } catch {
+      return false;
+    }
+  }, [refreshStorageEstimate]);
+
+  // Boot DB, sync overdue installments, and request browser persistent storage
+  useEffect(() => {
+    let active = true;
+    ensureDatabaseInitialized().then(async () => {
+      if (!active) return;
+      const savedSettings = await db.settings.get(1);
+      if (savedSettings?.storeInfo.defaultLanguage) {
+        setLangState(savedSettings.storeInfo.defaultLanguage);
+      }
+
+      // Sync overdue statuses for pending/partial installments past dueDate
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const openInsts = await db.installments.toArray();
+      const overdueIds = openInsts
+        .filter(
+          (i) =>
+            i.id &&
+            i.remainingAmount > 0.005 &&
+            i.status !== 'overdue' &&
+            i.dueDate < todayIso
+        )
+        .map((i) => i.id!);
+      if (overdueIds.length > 0) {
+        await Promise.all(
+          overdueIds.map((id) => db.installments.update(id, { status: 'overdue' }))
+        );
+      }
+
+      // Request persistent storage automatically so browsers are less likely to evict IndexedDB
+      if (typeof navigator !== 'undefined' && navigator.storage) {
+        try {
+          const alreadyPersisted = navigator.storage.persisted
+            ? await navigator.storage.persisted()
+            : false;
+          if (!alreadyPersisted && navigator.storage.persist) {
+            await navigator.storage.persist();
+          }
+        } catch {
+          // Non-fatal if browser denies persist()
+        }
+        await refreshStorageEstimate();
+      }
+
+      const admin =
+        (await db.users.where('username').equals('admin').first()) ??
+        (await db.users.toCollection().first());
+      if (admin) {
+        setCurrentUserState(admin);
+      }
+      if (savedSettings?.security.requireLoginOnStartup) {
+        setIsLocked(true);
+      }
+      setReady(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [refreshStorageEstimate]);
+
+  // Real Automatic Backup Scheduler (checks on startup + every 5 minutes)
+  const runAutoBackupNow = useCallback(
+    async (silent = false): Promise<boolean> => {
+      if (runningAutoBackupRef.current) return false;
+      const actor =
+        currentUser ??
+        (await db.users.where('username').equals('admin').first()) ??
+        (await db.users.toCollection().first());
+      if (!actor) return false;
+
+      runningAutoBackupRef.current = true;
+      try {
+        const now = new Date();
+        const label = `نسخة تلقائية — ${now.toLocaleDateString('ar-MA')} ${now.toLocaleTimeString('ar-MA', { hour: '2-digit', minute: '2-digit' })}`;
+        await createBackupRecord('auto', label, null, actor);
+        await refreshStorageEstimate();
+        if (!silent) {
+          notify(
+            lang === 'ar'
+              ? 'تم إنشاء نسخة احتياطية محلية تلقائية بنجاح'
+              : 'Sauvegarde locale automatique créée avec succès',
+            'info'
+          );
+        }
+        return true;
+      } catch (err) {
+        if (!silent) {
+          notify((err as Error).message, 'error');
+        }
+        return false;
+      } finally {
+        runningAutoBackupRef.current = false;
+      }
+    },
+    [currentUser, lang, notify, refreshStorageEstimate]
+  );
+
+  useEffect(() => {
+    if (!ready || !settings.backupConfig.autoBackupEnabled) return;
+
+    const checkAndRunAutoBackup = async () => {
+      const latestSettings = await db.settings.get(1);
+      const cfg = latestSettings?.backupConfig;
+      if (!cfg?.autoBackupEnabled) return;
+
+      const intervalMs = Math.max(1, cfg.autoBackupIntervalHours || 24) * 60 * 60 * 1000;
+      const lastTs = cfg.lastAutoBackupAt ? new Date(cfg.lastAutoBackupAt).getTime() : 0;
+      const isDue = !lastTs || Number.isNaN(lastTs) || Date.now() - lastTs >= intervalMs;
+      if (isDue) {
+        await runAutoBackupNow(true);
+      }
+    };
+
+    const startupTimeout = window.setTimeout(() => {
+      checkAndRunAutoBackup();
+    }, 2500);
+    const intervalId = window.setInterval(() => {
+      checkAndRunAutoBackup();
+    }, 5 * 60 * 1000);
+
+    return () => {
+      window.clearTimeout(startupTimeout);
+      window.clearInterval(intervalId);
+    };
+  }, [
+    ready,
+    settings.backupConfig.autoBackupEnabled,
+    settings.backupConfig.autoBackupIntervalHours,
+    runAutoBackupNow,
+  ]);
+
+  // Sync HTML lang & dir (RTL Arabic / LTR French)
+  useEffect(() => {
+    document.documentElement.lang = lang;
+    document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  }, [lang]);
+
+  // Auto-lock after idle minutes if configured in Security
+  useEffect(() => {
+    const minutes = settings.security.autoLockMinutes;
+    if (!minutes || minutes <= 0 || isLocked) return;
+
+    const resetTimer = () => {
+      if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = window.setTimeout(() => {
+        setIsLocked(true);
+        if (currentUser) {
+          db.loginLogs.add({
+            date: new Date().toISOString(),
+            username: currentUser.username,
+            status: 'locked',
+            details: `قفل تلقائي بعد ${minutes} دقيقة من الخمول`,
+          });
+        }
+      }, minutes * 60 * 1000);
+    };
+
+    const events = ['mousemove', 'keydown', 'click', 'touchstart'];
+    events.forEach((ev) => window.addEventListener(ev, resetTimer, { passive: true }));
+    resetTimer();
+    return () => {
+      if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
+      events.forEach((ev) => window.removeEventListener(ev, resetTimer));
+    };
+  }, [settings.security.autoLockMinutes, isLocked, currentUser]);
+
+  const setActiveSection = useCallback(
+    (sec: SectionId) => {
+      if (currentUser && !canAccessSection(currentUser, sec)) {
+        notify(
+          lang === 'ar'
+            ? 'ليس لديك صلاحية الوصول إلى هذا القسم'
+            : 'Vous n’avez pas la permission d’accéder à cette section',
+          'warning'
+        );
+        return;
+      }
+      setActiveSectionState(sec);
+    },
+    [currentUser, lang, notify]
+  );
+
+  const setCurrentUser = useCallback((u: AppUser | null) => {
+    setCurrentUserState(u);
+    if (u) {
+      setActiveSectionState((prev) => (canAccessSection(u, prev) ? prev : 'home'));
+    }
+  }, []);
+
+  const setLang = useCallback((next: Language) => {
+    setLangState(next);
+  }, []);
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const openPrint = useCallback((doc: PrintableDocument) => {
+    setPrintDoc(doc);
+  }, []);
+
+  const closePrint = useCallback(() => {
+    setPrintDoc(null);
+  }, []);
+
+  const requestGuardedAction = useCallback(
+    (req: {
+      title: string;
+      description: string;
+      isSensitiveDelete?: boolean;
+      isFinancialConfirm?: boolean;
+      onConfirm: () => Promise<void> | void;
+    }) => {
+      const needsDeletePwd =
+        Boolean(req.isSensitiveDelete) &&
+        settings.security.requireDeletePassword &&
+        Boolean(settings.security.deletePasswordHash);
+      const needsModal =
+        needsDeletePwd ||
+        Boolean(req.isSensitiveDelete) ||
+        (Boolean(req.isFinancialConfirm) && settings.security.requireFinancialConfirm);
+
+      if (!needsModal) {
+        Promise.resolve(req.onConfirm()).catch((err: Error) => notify(err.message, 'error'));
+        return;
+      }
+
+      setGuardRequest({
+        title: req.title,
+        description: req.description,
+        requirePassword: needsDeletePwd,
+        onConfirm: req.onConfirm,
+      });
+    },
+    [settings.security, notify]
+  );
+
+  const closeGuard = useCallback(() => setGuardRequest(null), []);
+
+  const verifyDeletePassword = useCallback(
+    async (password: string): Promise<boolean> => {
+      if (!settings.security.deletePasswordHash) return true;
+      return verifyPassword(
+        password,
+        settings.security.deletePasswordSalt,
+        settings.security.deletePasswordHash
+      );
+    },
+    [settings.security]
+  );
+
+  return (
+    <AppContext.Provider
+      value={{
+        ready,
+        lang,
+        setLang,
+        activeSection,
+        setActiveSection,
+        settings,
+        currentUser,
+        setCurrentUser,
+        isLocked,
+        setIsLocked,
+        notify,
+        toasts,
+        dismissToast,
+        printDoc,
+        openPrint,
+        closePrint,
+        requestGuardedAction,
+        guardRequest,
+        closeGuard,
+        verifyDeletePassword,
+        storageInfo,
+        requestPersistentStorage,
+        runAutoBackupNow,
+      }}
+    >
+      {children}
+    </AppContext.Provider>
+  );
+};
+
+export function useApp(): AppContextValue {
+  const ctx = useContext(AppContext);
+  if (!ctx) throw new Error('useApp must be used inside AppProvider');
+  return ctx;
+}

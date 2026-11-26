@@ -54,6 +54,8 @@ export interface AppUser {
   createdAt: string;
 }
 
+export type CloudSyncStatus = 'idle' | 'syncing' | 'synced' | 'offline' | 'error' | 'unlinked';
+
 export interface TenantAccount {
   accountId: string;
   storeName: string;
@@ -67,6 +69,10 @@ export interface TenantAccount {
   activatedAt: string;
   dbName: string;
   createdAt: string;
+  cloudUid?: string;
+  cloudEmail?: string;
+  syncRevision?: number;
+  lastSyncedAt?: string;
 }
 
 export interface AccountMemberIndex {

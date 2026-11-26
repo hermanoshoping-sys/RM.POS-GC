@@ -9,6 +9,9 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Cloud,
+  CloudDownload,
+  CloudUpload,
   Database,
   Download,
   FileText,
@@ -106,6 +109,13 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
     accounts,
     refreshAccounts,
     signOutAccount,
+    cloudUser,
+    cloudSyncStatus,
+    lastCloudSyncAt,
+    linkAccountToCloud,
+    syncNowToCloud,
+    pullLatestFromCloud,
+    signOutCloud,
     notify,
     openPrint,
     requestGuardedAction,
@@ -821,6 +831,87 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                     {t(lang, 'إنشاء حساب مستقل جديد', 'Nouveau compte')}
                   </button>
                 </div>
+              </div>
+
+              {/* Cloud Email Multi-Device Sync Bar */}
+              <div className="mt-3.5 pt-3 border-t border-white/15 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+                {cloudUser && activeAccount.cloudUid === cloudUser.uid ? (
+                  <>
+                    <div className="flex flex-wrap items-center gap-2 text-emerald-200">
+                      <Cloud className="h-4 w-4 text-emerald-300 shrink-0" />
+                      <span>
+                        {t(lang, 'مرتبط بالبريد السحابي (دخول من أي جهاز):', 'Synchronisé sur tout appareil via :')}
+                      </span>
+                      <span className="font-mono font-bold text-white" dir="ltr">
+                        {cloudUser.email}
+                      </span>
+                      {(lastCloudSyncAt || activeAccount.lastSyncedAt) && (
+                        <span className="text-[11px] text-blue-200">
+                          · {t(lang, 'آخر مزامنة:', 'Dernière sync :')}{' '}
+                          {formatDateTime(lastCloudSyncAt || activeAccount.lastSyncedAt || '', lang)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={cloudSyncStatus === 'syncing'}
+                        onClick={() => void syncNowToCloud(false)}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+                      >
+                        <CloudUpload className="h-3.5 w-3.5" />
+                        {cloudSyncStatus === 'syncing'
+                          ? t(lang, 'جاري المزامنة...', 'Synchronisation...')
+                          : t(lang, 'رفع ومزامنة الآن', 'Synchroniser')}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={cloudSyncStatus === 'syncing'}
+                        onClick={() => void pullLatestFromCloud(false)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-white/25 bg-white/10 px-3 py-1.5 text-xs font-bold text-white hover:bg-white/20 disabled:opacity-50"
+                      >
+                        <CloudDownload className="h-3.5 w-3.5" />
+                        {t(lang, 'سحب من السحابة', 'Récupérer')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void signOutCloud()}
+                        className="inline-flex items-center gap-1 rounded-lg border border-red-300/40 bg-red-500/20 px-2.5 py-1.5 text-xs font-bold text-red-100 hover:bg-red-500/30"
+                      >
+                        <LogOut className="h-3.5 w-3.5" />
+                        {t(lang, 'خروج سحابي', 'Déconnexion cloud')}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-2 text-blue-100">
+                      <Cloud className="h-4 w-4 text-[#FDE68A] shrink-0" />
+                      <span>
+                        {t(
+                          lang,
+                          'هذا الحساب محلي حالياً — اربطه ببريدك الإلكتروني لتتمكن من فتحه ومزامنته من أي جهاز آخر.',
+                          'Ce compte est local — liez-le à votre e-mail pour vous connecter depuis tout autre appareil.'
+                        )}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={cloudSyncStatus === 'syncing'}
+                      onClick={() => {
+                        linkAccountToCloud(activeAccount).catch((err) =>
+                          notify(err instanceof Error ? err.message : String(err), 'error')
+                        );
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-400 px-3.5 py-1.5 text-xs font-extrabold text-slate-950 hover:bg-emerald-300 disabled:opacity-50"
+                    >
+                      <CloudUpload className="h-3.5 w-3.5" />
+                      {cloudSyncStatus === 'syncing'
+                        ? t(lang, 'جاري الربط والرفع...', 'Liaison en cours...')
+                        : t(lang, 'ربط بالبريد الإلكتروني للمزامنة على أي جهاز', 'Lier par e-mail (Multi-appareils)')}
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           )}

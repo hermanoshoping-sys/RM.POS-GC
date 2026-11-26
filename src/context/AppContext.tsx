@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import {
   db,
   normalizeSettings,
@@ -10,9 +11,27 @@ import {
   listRegisteredAccounts,
 } from '../db/accountsDb';
 import { createBackupRecord } from '../db/operations';
+import { firebaseAuth } from '../firebase';
+import {
+  CloudAccountDoc,
+  computeActiveDbSyncFingerprint,
+  ensureCloudUserProfile,
+  formatFirebaseAuthError,
+  getStableDeviceId,
+  listCloudAccountsForUser,
+  publishActiveAccountToCloud,
+  pullCloudAccountToLocal,
+  registerWithCloudEmailPassword,
+  resendCloudEmailVerification,
+  signInWithCloudEmailPassword,
+  signInWithGoogleEmail,
+  signOutCloudEmail,
+  subscribeToCloudAccountChanges,
+} from '../services/cloudSync';
 import {
   AppSettings,
   AppUser,
+  CloudSyncStatus,
   Customer,
   CustomerPayment,
   Language,
@@ -91,9 +110,34 @@ interface AppContextValue {
   activateAccountSession: (
     account: TenantAccount,
     user: AppUser,
-    backupPassphrase?: string | null
+    backupPassphrase?: string | null,
+    options?: { autoSyncToCloud?: boolean }
   ) => Promise<void>;
   signOutAccount: (mode?: 'login' | 'register') => void;
+  // Cloud Email & Multi-Device Sync
+  cloudUser: FirebaseUser | null;
+  cloudAuthReady: boolean;
+  cloudAccounts: CloudAccountDoc[];
+  cloudSyncStatus: CloudSyncStatus;
+  lastCloudSyncAt: string | null;
+  refreshCloudAccounts: (uidOverride?: string) => Promise<CloudAccountDoc[]>;
+  signInWithGoogle: () => Promise<{ user: FirebaseUser; accounts: CloudAccountDoc[] }>;
+  signInWithCloudEmail: (
+    email: string,
+    password: string
+  ) => Promise<{ user: FirebaseUser; accounts: CloudAccountDoc[] }>;
+  registerWithCloudEmail: (
+    email: string,
+    password: string,
+    displayName: string
+  ) => Promise<FirebaseUser>;
+  resendVerificationEmail: () => Promise<void>;
+  signOutCloud: () => Promise<void>;
+  openCloudAccountOnDevice: (cloudAcc: CloudAccountDoc) => Promise<void>;
+  linkAccountToCloud: (accountToLink?: TenantAccount) => Promise<void>;
+  syncNowToCloud: (silent?: boolean) => Promise<boolean>;
+  pullLatestFromCloud: (silent?: boolean) => Promise<boolean>;
+  // Existing app state
   lang: Language;
   setLang: (lang: Language) => void;
   activeSection: SectionId;
@@ -169,10 +213,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     quotaBytes: 0,
   });
 
+  // Cloud Auth & Multi-Device Sync state
+  const [cloudUser, setCloudUser] = useState<FirebaseUser | null>(null);
+  const [cloudAuthReady, setCloudAuthReady] = useState(false);
+  const [cloudAccounts, setCloudAccounts] = useState<CloudAccountDoc[]>([]);
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<CloudSyncStatus>('unlinked');
+  const [lastCloudSyncAt, setLastCloudSyncAt] = useState<string | null>(null);
+
   const idleTimerRef = useRef<number | null>(null);
   const runningAutoBackupRef = useRef(false);
+  const isCloudSyncBusyRef = useRef(false);
+  const lastPushedFingerprintRef = useRef<string | null>(null);
+  const activeAccountRef = useRef<TenantAccount | null>(null);
+  const cloudUserRef = useRef<FirebaseUser | null>(null);
   // Keep backup encryption passphrase in memory ONLY — never persisted to disk/localStorage
   const sessionBackupPassphraseRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    activeAccountRef.current = activeAccount;
+  }, [activeAccount]);
+
+  useEffect(() => {
+    cloudUserRef.current = cloudUser;
+  }, [cloudUser]);
 
   const setSessionBackupPassphrase = useCallback((pass: string | null) => {
     const clean = pass && pass.trim().length > 0 ? pass.trim() : null;
@@ -207,7 +270,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setToasts((prev) => [...prev.slice(-3), { id, type, message }]);
     window.setTimeout(() => {
       setToasts((prev) => prev.filter((item) => item.id !== id));
-    }, 3800);
+    }, 4200);
   }, []);
 
   const refreshStorageEstimate = useCallback(async () => {
@@ -241,6 +304,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [refreshStorageEstimate]);
 
+  // Listen to Firebase Auth state (email identity persists safely across reloads and devices)
+  const refreshCloudAccounts = useCallback(
+    async (uidOverride?: string): Promise<CloudAccountDoc[]> => {
+      const targetUid = uidOverride ?? cloudUserRef.current?.uid;
+      if (!targetUid) {
+        setCloudAccounts([]);
+        return [];
+      }
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        setCloudSyncStatus('offline');
+        return [];
+      }
+      try {
+        const list = await listCloudAccountsForUser(targetUid);
+        setCloudAccounts(list);
+        return list;
+      } catch (err) {
+        console.error('Failed to list cloud accounts:', err);
+        return [];
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(firebaseAuth, async (fbUser) => {
+      setCloudUser(fbUser);
+      cloudUserRef.current = fbUser;
+      if (fbUser) {
+        if (fbUser.emailVerified && (typeof navigator === 'undefined' || navigator.onLine)) {
+          try {
+            await ensureCloudUserProfile(fbUser);
+            const list = await listCloudAccountsForUser(fbUser.uid);
+            setCloudAccounts(list);
+          } catch (err) {
+            console.error('Cloud bootstrap warning:', err);
+          }
+        }
+      } else {
+        setCloudAccounts([]);
+        setCloudSyncStatus('unlinked');
+        setLastCloudSyncAt(null);
+      }
+      setCloudAuthReady(true);
+    });
+    return () => unsub();
+  }, []);
+
   // Boot multi-tenant accounts registry, migrate legacy DB if present, and request persistent storage
   useEffect(() => {
     let active = true;
@@ -251,7 +362,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       setAccounts(registered);
 
-      // Request persistent storage automatically so browsers are less likely to evict IndexedDB
       if (typeof navigator !== 'undefined' && navigator.storage) {
         try {
           const alreadyPersisted = navigator.storage.persisted
@@ -268,7 +378,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (registered.length === 0) {
         setNeedsFirstRunSetup(true);
-        setAuthPortalMode('register');
+        setAuthPortalMode('login');
         setActiveAccount(null);
         setCurrentUserState(null);
         setIsLockedState(true);
@@ -293,7 +403,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setActiveAccount(preferred);
         setNeedsFirstRunSetup(false);
         setAuthPortalMode('login');
-        // Never auto-login; require explicit authentication on startup
+        // Never auto-login local session without explicit unlock or cloud email sign-in
         setCurrentUserState(null);
         setIsLockedState(true);
       }
@@ -305,8 +415,79 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [refreshStorageEstimate]);
 
+  const syncNowToCloud = useCallback(
+    async (silent = false): Promise<boolean> => {
+      const fbUser = cloudUserRef.current;
+      const acc = activeAccountRef.current;
+      if (!fbUser || !fbUser.emailVerified || !acc || acc.cloudUid !== fbUser.uid) {
+        if (!silent && !fbUser) {
+          notify(
+            lang === 'ar'
+              ? 'يرجى ربط حساب البريد الإلكتروني السحابي أولاً'
+              : 'Veuillez d’abord connecter votre compte e-mail cloud',
+            'warning'
+          );
+        }
+        return false;
+      }
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        setCloudSyncStatus('offline');
+        if (!silent) {
+          notify(
+            lang === 'ar'
+              ? 'أنت غير متصل بالإنترنت — ستتم المزامنة السحابية تلقائياً عند عودة الاتصال'
+              : 'Hors ligne — la synchronisation cloud reprendra automatiquement',
+            'warning'
+          );
+        }
+        return false;
+      }
+      if (isCloudSyncBusyRef.current) return false;
+
+      isCloudSyncBusyRef.current = true;
+      setCloudSyncStatus('syncing');
+      try {
+        const result = await publishActiveAccountToCloud(fbUser, acc);
+        lastPushedFingerprintRef.current = await computeActiveDbSyncFingerprint();
+        const latestAccounts = await listRegisteredAccounts();
+        setAccounts(latestAccounts);
+        const refreshed = latestAccounts.find((a) => a.accountId === acc.accountId);
+        if (refreshed) {
+          setActiveAccount(refreshed);
+          activeAccountRef.current = refreshed;
+        }
+        setLastCloudSyncAt(result.syncedAtIso);
+        setCloudSyncStatus('synced');
+        await refreshCloudAccounts(fbUser.uid);
+        if (!silent) {
+          notify(
+            lang === 'ar'
+              ? `تمت مزامنة بيانات «${acc.storeName}» سحابياً بنجاح`
+              : `Données de « ${acc.storeName} » synchronisées dans le cloud`,
+            'success'
+          );
+        }
+        return true;
+      } catch (err) {
+        setCloudSyncStatus('error');
+        if (!silent) {
+          notify(formatFirebaseAuthError(err, lang), 'error');
+        }
+        return false;
+      } finally {
+        isCloudSyncBusyRef.current = false;
+      }
+    },
+    [lang, notify, refreshCloudAccounts]
+  );
+
   const activateAccountSession = useCallback(
-    async (account: TenantAccount, user: AppUser, backupPassphrase?: string | null) => {
+    async (
+      account: TenantAccount,
+      user: AppUser,
+      backupPassphrase?: string | null,
+      options?: { autoSyncToCloud?: boolean }
+    ) => {
       await switchActiveTenantDatabase(account.dbName);
       await syncOverdueInstallmentsInActiveDb();
       const savedSettings = await db.settings.get(1);
@@ -323,6 +504,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const freshAccount =
         latestAccounts.find((a) => a.accountId === account.accountId) ?? account;
       setActiveAccount(freshAccount);
+      activeAccountRef.current = freshAccount;
       setNeedsFirstRunSetup(false);
       setAuthPortalMode('login');
       if (backupPassphrase !== undefined) {
@@ -331,19 +513,364 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setCurrentUserState(user);
       setActiveSectionState(canAccessSection(user, 'home') ? 'home' : 'pos');
       setIsLockedState(false);
+
+      const currentFp = await computeActiveDbSyncFingerprint();
+      lastPushedFingerprintRef.current = currentFp;
+
+      const fbUser = cloudUserRef.current;
+      if (options?.autoSyncToCloud && fbUser && fbUser.emailVerified) {
+        isCloudSyncBusyRef.current = true;
+        setCloudSyncStatus('syncing');
+        try {
+          const res = await publishActiveAccountToCloud(fbUser, freshAccount);
+          lastPushedFingerprintRef.current = await computeActiveDbSyncFingerprint();
+          const updatedList = await listRegisteredAccounts();
+          setAccounts(updatedList);
+          const updatedAcc =
+            updatedList.find((a) => a.accountId === freshAccount.accountId) ?? freshAccount;
+          setActiveAccount(updatedAcc);
+          activeAccountRef.current = updatedAcc;
+          setLastCloudSyncAt(res.syncedAtIso);
+          setCloudSyncStatus('synced');
+          await refreshCloudAccounts(fbUser.uid);
+        } catch (err) {
+          setCloudSyncStatus('error');
+          notify(formatFirebaseAuthError(err, lang), 'warning');
+        } finally {
+          isCloudSyncBusyRef.current = false;
+        }
+      } else if (freshAccount.cloudUid && fbUser?.uid === freshAccount.cloudUid) {
+        setLastCloudSyncAt(freshAccount.lastSyncedAt ?? null);
+        setCloudSyncStatus(
+          typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'synced'
+        );
+      } else {
+        setCloudSyncStatus('unlinked');
+      }
     },
-    [setSessionBackupPassphrase]
+    [lang, notify, refreshCloudAccounts, setSessionBackupPassphrase]
   );
 
+  const openCloudAccountOnDevice = useCallback(
+    async (cloudAcc: CloudAccountDoc) => {
+      const fbUser = cloudUserRef.current;
+      if (!fbUser) {
+        throw new Error('يرجى تسجيل الدخول بالبريد الإلكتروني السحابي أولاً');
+      }
+      isCloudSyncBusyRef.current = true;
+      setCloudSyncStatus('syncing');
+      try {
+        const { account, ownerUser } = await pullCloudAccountToLocal(fbUser.uid, cloudAcc);
+        if (!ownerUser) {
+          throw new Error('لم يتم العثور على مستخدم نشط داخل هذا الحساب السحابي');
+        }
+        await activateAccountSession(account, ownerUser);
+        setLastCloudSyncAt(account.lastSyncedAt ?? new Date().toISOString());
+        setCloudSyncStatus('synced');
+      } catch (err) {
+        setCloudSyncStatus('error');
+        throw err;
+      } finally {
+        isCloudSyncBusyRef.current = false;
+      }
+    },
+    [activateAccountSession]
+  );
+
+  const pullLatestFromCloud = useCallback(
+    async (silent = false): Promise<boolean> => {
+      const fbUser = cloudUserRef.current;
+      const acc = activeAccountRef.current;
+      if (!fbUser || !acc || acc.cloudUid !== fbUser.uid) return false;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        setCloudSyncStatus('offline');
+        return false;
+      }
+      if (isCloudSyncBusyRef.current) return false;
+
+      isCloudSyncBusyRef.current = true;
+      setCloudSyncStatus('syncing');
+      try {
+        const remoteList = await listCloudAccountsForUser(fbUser.uid);
+        setCloudAccounts(remoteList);
+        const match = remoteList.find((c) => c.accountId === acc.accountId);
+        if (!match) {
+          setCloudSyncStatus('synced');
+          return false;
+        }
+        const { account } = await pullCloudAccountToLocal(fbUser.uid, match);
+        lastPushedFingerprintRef.current = await computeActiveDbSyncFingerprint();
+        const latestAccounts = await listRegisteredAccounts();
+        setAccounts(latestAccounts);
+        setActiveAccount(account);
+        activeAccountRef.current = account;
+        setLastCloudSyncAt(account.lastSyncedAt ?? new Date().toISOString());
+        setCloudSyncStatus('synced');
+        if (!silent) {
+          notify(
+            lang === 'ar'
+              ? 'تم تحديث البيانات من السحابة بنجاح'
+              : 'Données mises à jour depuis le cloud',
+            'info'
+          );
+        }
+        return true;
+      } catch (err) {
+        setCloudSyncStatus('error');
+        if (!silent) {
+          notify(formatFirebaseAuthError(err, lang), 'error');
+        }
+        return false;
+      } finally {
+        isCloudSyncBusyRef.current = false;
+      }
+    },
+    [lang, notify]
+  );
+
+  const linkAccountToCloud = useCallback(
+    async (accountToLink?: TenantAccount) => {
+      let fbUser = cloudUserRef.current;
+      if (!fbUser) {
+        fbUser = await signInWithGoogleEmail();
+        setCloudUser(fbUser);
+        cloudUserRef.current = fbUser;
+      }
+      if (!fbUser.emailVerified) {
+        throw new Error(
+          lang === 'ar'
+            ? 'يرجى تأكيد بريدك الإلكتروني أولاً لتفعيل المزامنة السحابية'
+            : 'Veuillez d’abord vérifier votre adresse e-mail'
+        );
+      }
+      const target = accountToLink ?? activeAccountRef.current;
+      if (!target) {
+        throw new Error('لا يوجد حساب متجر نشط لربطه');
+      }
+
+      isCloudSyncBusyRef.current = true;
+      setCloudSyncStatus('syncing');
+      try {
+        await switchActiveTenantDatabase(target.dbName);
+        const res = await publishActiveAccountToCloud(fbUser, target);
+        lastPushedFingerprintRef.current = await computeActiveDbSyncFingerprint();
+        const latestAccounts = await listRegisteredAccounts();
+        setAccounts(latestAccounts);
+        const refreshed = latestAccounts.find((a) => a.accountId === target.accountId);
+        if (refreshed && activeAccountRef.current?.accountId === refreshed.accountId) {
+          setActiveAccount(refreshed);
+          activeAccountRef.current = refreshed;
+        }
+        setLastCloudSyncAt(res.syncedAtIso);
+        setCloudSyncStatus('synced');
+        await refreshCloudAccounts(fbUser.uid);
+        notify(
+          lang === 'ar'
+            ? `تم ربط «${target.storeName}» بالبريد ${fbUser.email} ويمكنك الآن الدخول إليه من أي جهاز`
+            : `« ${target.storeName} » est lié à ${fbUser.email} et accessible sur tout appareil`,
+          'success'
+        );
+      } catch (err) {
+        setCloudSyncStatus('error');
+        throw err;
+      } finally {
+        isCloudSyncBusyRef.current = false;
+      }
+    },
+    [lang, notify, refreshCloudAccounts]
+  );
+
+  const signInWithGoogle = useCallback(async () => {
+    const user = await signInWithGoogleEmail();
+    setCloudUser(user);
+    cloudUserRef.current = user;
+    const list = user.emailVerified ? await listCloudAccountsForUser(user.uid) : [];
+    setCloudAccounts(list);
+    return { user, accounts: list };
+  }, []);
+
+  const signInWithCloudEmail = useCallback(async (email: string, password: string) => {
+    const user = await signInWithCloudEmailPassword(email, password);
+    setCloudUser(user);
+    cloudUserRef.current = user;
+    const list = user.emailVerified ? await listCloudAccountsForUser(user.uid) : [];
+    setCloudAccounts(list);
+    return { user, accounts: list };
+  }, []);
+
+  const registerWithCloudEmail = useCallback(
+    async (email: string, password: string, displayName: string) => {
+      const user = await registerWithCloudEmailPassword(email, password, displayName);
+      setCloudUser(user);
+      cloudUserRef.current = user;
+      return user;
+    },
+    []
+  );
+
+  const resendVerificationEmail = useCallback(async () => {
+    await resendCloudEmailVerification();
+  }, []);
+
   const signOutAccount = useCallback((mode: 'login' | 'register' = 'login') => {
+    // Best-effort silent cloud push before exiting active store
+    if (
+      cloudUserRef.current?.emailVerified &&
+      activeAccountRef.current?.cloudUid === cloudUserRef.current.uid &&
+      !isCloudSyncBusyRef.current
+    ) {
+      void syncNowToCloud(true);
+    }
     sessionBackupPassphraseRef.current = null;
     setHasSessionBackupPassphrase(false);
     setCurrentUserState(null);
     setActiveAccount(null);
+    activeAccountRef.current = null;
     setActiveSectionState('home');
     setAuthPortalMode(mode);
     setIsLockedState(true);
-  }, []);
+  }, [syncNowToCloud]);
+
+  const signOutCloud = useCallback(async () => {
+    if (
+      cloudUserRef.current?.emailVerified &&
+      activeAccountRef.current?.cloudUid === cloudUserRef.current.uid &&
+      !isCloudSyncBusyRef.current
+    ) {
+      await syncNowToCloud(true);
+    }
+    await signOutCloudEmail();
+    setCloudUser(null);
+    cloudUserRef.current = null;
+    setCloudAccounts([]);
+    setCloudSyncStatus('unlinked');
+    setLastCloudSyncAt(null);
+    sessionBackupPassphraseRef.current = null;
+    setHasSessionBackupPassphrase(false);
+    setCurrentUserState(null);
+    setActiveAccount(null);
+    activeAccountRef.current = null;
+    setActiveSectionState('home');
+    setAuthPortalMode('login');
+    setIsLockedState(true);
+  }, [syncNowToCloud]);
+
+  // Real-time cross-device Firestore listener + automatic debounced background sync
+  useEffect(() => {
+    if (
+      !ready ||
+      !cloudAuthReady ||
+      !cloudUser ||
+      !cloudUser.emailVerified ||
+      !activeAccount ||
+      activeAccount.cloudUid !== cloudUser.uid ||
+      isLocked ||
+      !currentUser
+    ) {
+      if (activeAccount && (!cloudUser || activeAccount.cloudUid !== cloudUser.uid)) {
+        setCloudSyncStatus('unlinked');
+      }
+      return;
+    }
+
+    const deviceId = getStableDeviceId();
+    const unsub = subscribeToCloudAccountChanges(
+      cloudUser.uid,
+      activeAccount.accountId,
+      async (remoteAcc) => {
+        const localRev = activeAccountRef.current?.syncRevision ?? 0;
+        if (
+          remoteAcc.syncRevision > localRev &&
+          remoteAcc.lastSyncedDeviceId !== deviceId &&
+          !isCloudSyncBusyRef.current
+        ) {
+          isCloudSyncBusyRef.current = true;
+          setCloudSyncStatus('syncing');
+          try {
+            const { account } = await pullCloudAccountToLocal(cloudUser.uid, remoteAcc);
+            lastPushedFingerprintRef.current = await computeActiveDbSyncFingerprint();
+            const latestAccounts = await listRegisteredAccounts();
+            setAccounts(latestAccounts);
+            setActiveAccount(account);
+            activeAccountRef.current = account;
+            setLastCloudSyncAt(account.lastSyncedAt ?? new Date().toISOString());
+            setCloudSyncStatus('synced');
+            notify(
+              lang === 'ar'
+                ? 'تم استلام تحديثات جديدة من جهاز آخر تلقائياً'
+                : 'Nouvelles mises à jour reçues automatiquement d’un autre appareil',
+              'info'
+            );
+          } catch (err) {
+            setCloudSyncStatus('error');
+            console.error('Auto-pull sync error:', err);
+          } finally {
+            isCloudSyncBusyRef.current = false;
+          }
+        }
+      },
+      () => {
+        setCloudSyncStatus('error');
+      }
+    );
+
+    // Periodic dirty-check every 15s to push local POS changes automatically to the cloud
+    const pushIfDirty = async () => {
+      if (isCloudSyncBusyRef.current) return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        setCloudSyncStatus('offline');
+        return;
+      }
+      try {
+        const currentFp = await computeActiveDbSyncFingerprint();
+        if (lastPushedFingerprintRef.current && currentFp !== lastPushedFingerprintRef.current) {
+          await syncNowToCloud(true);
+        }
+      } catch {
+        // Ignore transient read errors
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void pushIfDirty();
+    }, 15_000);
+
+    const handleOnline = () => {
+      setCloudSyncStatus('synced');
+      void pushIfDirty();
+    };
+    const handleOffline = () => {
+      setCloudSyncStatus('offline');
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        void pushIfDirty();
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      unsub();
+      window.clearInterval(intervalId);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [
+    ready,
+    cloudAuthReady,
+    cloudUser,
+    activeAccount?.accountId,
+    activeAccount?.cloudUid,
+    isLocked,
+    currentUser,
+    lang,
+    notify,
+    syncNowToCloud,
+  ]);
 
   // Real Automatic External Backup Scheduler (checks on startup + every 5 minutes)
   const runAutoBackupNow = useCallback(
@@ -430,10 +957,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     const startupTimeout = window.setTimeout(() => {
-      checkAndRunAutoBackup();
+      void checkAndRunAutoBackup();
     }, 2500);
     const intervalId = window.setInterval(() => {
-      checkAndRunAutoBackup();
+      void checkAndRunAutoBackup();
     }, 5 * 60 * 1000);
 
     return () => {
@@ -584,6 +1111,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         refreshAccounts,
         activateAccountSession,
         signOutAccount,
+        cloudUser,
+        cloudAuthReady,
+        cloudAccounts,
+        cloudSyncStatus,
+        lastCloudSyncAt,
+        refreshCloudAccounts,
+        signInWithGoogle,
+        signInWithCloudEmail,
+        registerWithCloudEmail,
+        resendVerificationEmail,
+        signOutCloud,
+        openCloudAccountOnDevice,
+        linkAccountToCloud,
+        syncNowToCloud,
+        pullLatestFromCloud,
         lang,
         setLang,
         activeSection,

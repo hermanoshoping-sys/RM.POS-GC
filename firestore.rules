@@ -1,0 +1,343 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net — default deny all unmatched paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Reusable Hardened Global Primitives
+    // =========================================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email == 'hermanoshoping@gmail.com' && request.auth.token.email_verified == true)
+      );
+    }
+
+    function isValidEmailStr(val) {
+      return val is string && val.size() >= 3 && val.size() <= 160 && val.matches('^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$');
+    }
+
+    function isValidTableName(name) {
+      return name is string && name.size() >= 3 && name.size() <= 32 && name in [
+        'users',
+        'categories',
+        'products',
+        'priceHistory',
+        'customers',
+        'suppliers',
+        'saleInvoices',
+        'saleReturns',
+        'installments',
+        'heldCarts',
+        'purchaseInvoices',
+        'supplierReturns',
+        'stockMovements',
+        'customerPayments',
+        'supplierPayments',
+        'expenses',
+        'cashSessions',
+        'auditLogs',
+        'loginLogs',
+        'settings'
+      ];
+    }
+
+    // Master Gate helper for subcollections under /users/{userId}/accounts/{accountId}
+    function isActiveAccountOwner(userId, accountId) {
+      return isOwner(userId)
+        && exists(/databases/$(database)/documents/users/$(userId)/accounts/$(accountId))
+        && get(/databases/$(database)/documents/users/$(userId)/accounts/$(accountId)).data.ownerUid == request.auth.uid
+        && get(/databases/$(database)/documents/users/$(userId)/accounts/$(accountId)).data.licenseStatus == 'active';
+    }
+
+    // =========================================================================
+    // Validation Blueprints (Anti-Update-Gap Helpers)
+    // =========================================================================
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'activeAccountId', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && (data.uid == request.auth.uid || isAdmin())
+        && isValidEmailStr(data.email)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500))
+        && (!('activeAccountId' in data) || (isValidId(data.activeAccountId) && data.activeAccountId.size() >= 3))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCloudAccount(data, userId, accountId) {
+      return data.keys().hasAll([
+          'accountId',
+          'ownerUid',
+          'ownerEmail',
+          'ownerName',
+          'storeName',
+          'licenseNumber',
+          'activationCodeHash',
+          'activationCodeSalt',
+          'licenseStatus',
+          'activatedAt',
+          'syncRevision',
+          'lastSyncedAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'accountId',
+          'ownerUid',
+          'ownerEmail',
+          'ownerPhone',
+          'ownerName',
+          'storeName',
+          'licenseNumber',
+          'activationCodeHash',
+          'activationCodeSalt',
+          'licenseStatus',
+          'activatedAt',
+          'syncRevision',
+          'lastSyncedDeviceId',
+          'lastSyncedAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.accountId) && data.accountId.size() >= 3 && data.accountId == accountId
+        && isValidId(data.ownerUid) && data.ownerUid == userId && (data.ownerUid == request.auth.uid || isAdmin())
+        && isValidEmailStr(data.ownerEmail)
+        && (!('ownerPhone' in data) || (data.ownerPhone is string && data.ownerPhone.size() <= 32))
+        && data.ownerName is string && data.ownerName.size() >= 2 && data.ownerName.size() <= 120
+        && data.storeName is string && data.storeName.size() >= 2 && data.storeName.size() <= 140
+        && data.licenseNumber is string && data.licenseNumber.size() == 19 && data.licenseNumber.matches('^RMGC-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$')
+        && data.activationCodeHash is string && data.activationCodeHash.size() >= 16 && data.activationCodeHash.size() <= 200
+        && data.activationCodeSalt is string && data.activationCodeSalt.size() >= 8 && data.activationCodeSalt.size() <= 128
+        && data.licenseStatus in ['active', 'revoked']
+        && data.activatedAt is string && data.activatedAt.size() >= 10 && data.activatedAt.size() <= 40
+        && data.syncRevision is int && data.syncRevision >= 0 && data.syncRevision <= 100000000
+        && (!('lastSyncedDeviceId' in data) || (isValidId(data.lastSyncedDeviceId) && data.lastSyncedDeviceId.size() >= 3))
+        && data.lastSyncedAt is timestamp
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTableChunk(data, userId, accountId) {
+      return data.keys().hasAll([
+          'ownerUid',
+          'accountId',
+          'tableName',
+          'chunkIndex',
+          'totalChunks',
+          'itemCount',
+          'items',
+          'syncRevision',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerUid',
+          'accountId',
+          'tableName',
+          'chunkIndex',
+          'totalChunks',
+          'itemCount',
+          'items',
+          'syncRevision',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.ownerUid) && data.ownerUid == userId && (data.ownerUid == request.auth.uid || isAdmin())
+        && isValidId(data.accountId) && data.accountId.size() >= 3 && data.accountId == accountId
+        && isValidTableName(data.tableName)
+        && data.chunkIndex is int && data.chunkIndex >= 0 && data.chunkIndex <= 500
+        && data.totalChunks is int && data.totalChunks >= 1 && data.totalChunks <= 501
+        && data.itemCount is int && data.itemCount >= 0 && data.itemCount <= 100
+        && data.items is list && data.items.size() == data.itemCount && data.items.size() <= 100
+        && (data.items.size() == 0 || data.items[0] is map)
+        && data.syncRevision is int && data.syncRevision >= 0 && data.syncRevision <= 100000000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRole(data, adminUid) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'createdAt'])
+        && isValidId(data.uid) && data.uid == adminUid
+        && isValidEmailStr(data.email)
+        && data.createdAt is timestamp;
+    }
+
+    // =========================================================================
+    // Collection: /admins/{adminUid}
+    // =========================================================================
+    match /admins/{adminUid} {
+      allow get: if isSignedIn() && isValidId(adminUid) && (isOwner(adminUid) || isAdmin());
+      allow list: if false;
+      allow create: if isVerifiedUser() && isValidId(adminUid) && isValidAdminRole(incoming(), adminUid)
+        && incoming().createdAt == request.time
+        && isAdmin();
+      allow update: if isVerifiedUser() && isValidId(adminUid) && isValidAdminRole(incoming(), adminUid)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && isAdmin()
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email']);
+      allow delete: if isVerifiedUser() && isValidId(adminUid) && isAdmin();
+    }
+
+    // =========================================================================
+    // Collection: /users/{userId} (Private PII-Isolated Profile)
+    // =========================================================================
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if false;
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isOwner(userId);
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'activeAccountId', 'email', 'updatedAt']))
+        );
+      allow delete: if isVerifiedUser() && isValidId(userId) && (isOwner(userId) || isAdmin());
+
+      // =======================================================================
+      // Subcollection: /users/{userId}/accounts/{accountId}
+      // =======================================================================
+      match /accounts/{accountId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(accountId) && (isOwner(userId) || isAdmin());
+        allow list: if isSignedIn() && (
+          (request.auth.uid == userId && existing().ownerUid == request.auth.uid) ||
+          isAdmin()
+        );
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(accountId)
+          && isValidCloudAccount(incoming(), userId, accountId)
+          && incoming().licenseStatus == 'active'
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && incoming().lastSyncedAt == request.time
+          && (isOwner(userId) || isAdmin())
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(accountId)
+          && isValidCloudAccount(incoming(), userId, accountId)
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().accountId == existing().accountId
+          && incoming().licenseNumber == existing().licenseNumber
+          && incoming().activationCodeHash == existing().activationCodeHash
+          && incoming().activationCodeSalt == existing().activationCodeSalt
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (existing().licenseStatus != 'revoked' || isAdmin())
+          && (
+            isAdmin() ||
+            (
+              isOwner(userId)
+              && incoming().licenseStatus == existing().licenseStatus
+              && (
+                // Action: Update Store Metadata
+                incoming().diff(existing()).affectedKeys().hasOnly(['storeName', 'ownerName', 'ownerPhone', 'ownerEmail', 'updatedAt']) ||
+                // Action: Publish New Cloud Sync Revision
+                (
+                  incoming().diff(existing()).affectedKeys().hasOnly(['syncRevision', 'lastSyncedDeviceId', 'lastSyncedAt', 'storeName', 'updatedAt'])
+                  && incoming().lastSyncedAt == request.time
+                  && incoming().syncRevision >= existing().syncRevision
+                )
+              )
+            )
+          );
+        allow delete: if isVerifiedUser() && isValidId(userId) && isValidId(accountId) && (isOwner(userId) || isAdmin());
+
+        // =====================================================================
+        // Subcollection: /users/{userId}/accounts/{accountId}/tableChunks/{chunkId}
+        // =====================================================================
+        match /tableChunks/{chunkId} {
+          allow get: if isSignedIn()
+            && isValidId(userId)
+            && isValidId(accountId)
+            && isValidId(chunkId)
+            && (isActiveAccountOwner(userId, accountId) || isAdmin());
+          allow list: if isSignedIn() && (
+            (request.auth.uid == userId && existing().ownerUid == request.auth.uid) ||
+            isAdmin()
+          );
+          allow create: if isVerifiedUser()
+            && isValidId(userId)
+            && isValidId(accountId)
+            && isValidId(chunkId)
+            && isValidTableChunk(incoming(), userId, accountId)
+            && incoming().createdAt == request.time
+            && incoming().updatedAt == request.time
+            && (isActiveAccountOwner(userId, accountId) || isAdmin());
+          allow update: if isVerifiedUser()
+            && isValidId(userId)
+            && isValidId(accountId)
+            && isValidId(chunkId)
+            && isValidTableChunk(incoming(), userId, accountId)
+            && incoming().ownerUid == existing().ownerUid
+            && incoming().accountId == existing().accountId
+            && incoming().tableName == existing().tableName
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
+            && (
+              isAdmin() ||
+              (
+                isActiveAccountOwner(userId, accountId)
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'chunkIndex',
+                  'totalChunks',
+                  'itemCount',
+                  'items',
+                  'syncRevision',
+                  'updatedAt'
+                ])
+              )
+            );
+          allow delete: if isVerifiedUser()
+            && isValidId(userId)
+            && isValidId(accountId)
+            && isValidId(chunkId)
+            && (isActiveAccountOwner(userId, accountId) || isAdmin());
+        }
+      }
+    }
+  }
+}

@@ -11,12 +11,15 @@ import {
   Calendar,
   ClipboardCheck,
   Clock,
+  Cloud,
+  CloudOff,
   FolderTree,
   LayoutDashboard,
   LayoutGrid,
   Lock,
   LogOut,
   Package,
+  RefreshCw,
   Settings,
   ShoppingBag,
   ShoppingCart,
@@ -26,6 +29,7 @@ import {
   X,
 } from 'lucide-react';
 import { AppProvider, useApp } from './context/AppContext';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { NAV_SECTIONS, t } from './i18n/translations';
 import { SectionId } from './types';
 import { HomeLauncher } from './components/HomeLauncher';
@@ -69,6 +73,9 @@ const AppShell: React.FC = () => {
     needsFirstRunSetup,
     activeAccount,
     signOutAccount,
+    cloudUser,
+    cloudSyncStatus,
+    syncNowToCloud,
     lang,
     setLang,
     activeSection,
@@ -291,6 +298,50 @@ const AppShell: React.FC = () => {
                 FR
               </button>
             </div>
+
+            {/* Cloud Email Sync Button */}
+            <button
+              type="button"
+              onClick={() => {
+                if (cloudUser && activeAccount.cloudUid === cloudUser.uid) {
+                  void syncNowToCloud(false);
+                } else {
+                  setSettingsTab('security');
+                  setActiveSection('settings');
+                }
+              }}
+              title={
+                cloudUser && activeAccount.cloudUid === cloudUser.uid
+                  ? `${t(lang, 'مزامنة سحابية مع:', 'Synchronisé avec :')} ${cloudUser.email} — ${t(lang, 'انقر للمزامنة الآن', 'Cliquer pour synchroniser')}`
+                  : t(lang, 'ربط المتجر بالبريد الإلكتروني للمزامنة من أي جهاز', 'Lier à un e-mail pour synchroniser sur tout appareil')
+              }
+              className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border px-2 py-1.5 text-[11px] font-bold transition-colors shrink-0 ${
+                cloudUser && activeAccount.cloudUid === cloudUser.uid
+                  ? cloudSyncStatus === 'error'
+                    ? 'border-red-400/60 bg-red-500/20 text-red-100 hover:bg-red-500/30'
+                    : cloudSyncStatus === 'offline'
+                      ? 'border-amber-400/60 bg-amber-500/20 text-amber-100'
+                      : 'border-emerald-400/50 bg-emerald-500/20 text-emerald-100 hover:bg-emerald-500/30'
+                  : 'border-white/20 bg-white/10 text-blue-100 hover:bg-white/20'
+              }`}
+            >
+              {cloudSyncStatus === 'syncing' ? (
+                <RefreshCw className="h-3.5 w-3.5 animate-spin text-[#F4BE42]" />
+              ) : cloudSyncStatus === 'offline' ? (
+                <CloudOff className="h-3.5 w-3.5 text-amber-300" />
+              ) : (
+                <Cloud className="h-3.5 w-3.5 text-[#F4BE42]" />
+              )}
+              <span className="hidden lg:inline">
+                {cloudUser && activeAccount.cloudUid === cloudUser.uid
+                  ? cloudSyncStatus === 'syncing'
+                    ? t(lang, 'مزامنة...', 'Sync...')
+                    : cloudSyncStatus === 'offline'
+                      ? t(lang, 'دون اتصال', 'Hors ligne')
+                      : t(lang, 'سحابي', 'Cloud')
+                  : t(lang, 'ربط الإيميل', 'Lier e-mail')}
+              </span>
+            </button>
 
             {/* User & Lock (switch staff within same account) */}
             <button
@@ -694,8 +745,10 @@ const AppShell: React.FC = () => {
 
 export default function App() {
   return (
-    <AppProvider>
-      <AppShell />
-    </AppProvider>
+    <ErrorBoundary>
+      <AppProvider>
+        <AppShell />
+      </AppProvider>
+    </ErrorBoundary>
   );
 }

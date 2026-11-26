@@ -436,7 +436,20 @@ export async function createStaffUserInActiveAccount(
  */
 export async function syncAccountStoreMetadata(
   accountId: string,
-  patch: Partial<Pick<TenantAccount, 'storeName' | 'ownerEmail' | 'ownerPhone'>>
+  patch: Partial<
+    Pick<
+      TenantAccount,
+      'storeName' | 'ownerEmail' | 'ownerPhone' | 'cloudUid' | 'cloudEmail' | 'syncRevision' | 'lastSyncedAt'
+    >
+  >
 ): Promise<void> {
   await accountsDb.accounts.update(accountId, patch);
 }
+
+/**
+ * Inserts or updates a local TenantAccount entry pulled from Cloud Firestore.
+ */
+export async function upsertLocalTenantAccount(account: TenantAccount): Promise<void> {
+  await accountsDb.accounts.put(account);
+}
+

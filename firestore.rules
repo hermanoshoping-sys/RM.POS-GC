@@ -35,15 +35,19 @@ service cloud.firestore {
       return resource.data;
     }
 
+    function isBootstrappedAdmin() {
+      return isSignedIn() && (request.auth.token.email == 'hermanoshoping@gmail.com' && request.auth.token.email_verified == true);
+    }
+
     function isAdmin() {
       return isSignedIn() && (
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
-        (request.auth.token.email == 'hermanoshoping@gmail.com' && request.auth.token.email_verified == true)
+        isBootstrappedAdmin() ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
 
     function isValidEmailStr(val) {
-      return val is string && val.size() >= 3 && val.size() <= 160 && val.matches('^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$');
+      return val is string && val.size() >= 3 && val.size() <= 160 && val.matches('^[^@ ]+@[^@ ]+\\.[^@ ]+$');
     }
 
     function isValidTableName(name) {
@@ -89,8 +93,8 @@ service cloud.firestore {
         && data.uid == userId
         && (data.uid == request.auth.uid || isAdmin())
         && isValidEmailStr(data.email)
-        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
-        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500))
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 240
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 1024))
         && (!('activeAccountId' in data) || (isValidId(data.activeAccountId) && data.activeAccountId.size() >= 3))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -135,8 +139,8 @@ service cloud.firestore {
         && isValidId(data.ownerUid) && data.ownerUid == userId && (data.ownerUid == request.auth.uid || isAdmin())
         && isValidEmailStr(data.ownerEmail)
         && (!('ownerPhone' in data) || (data.ownerPhone is string && data.ownerPhone.size() <= 32))
-        && data.ownerName is string && data.ownerName.size() >= 2 && data.ownerName.size() <= 120
-        && data.storeName is string && data.storeName.size() >= 2 && data.storeName.size() <= 140
+        && data.ownerName is string && data.ownerName.size() >= 2 && data.ownerName.size() <= 240
+        && data.storeName is string && data.storeName.size() >= 2 && data.storeName.size() <= 280
         && data.licenseNumber is string && data.licenseNumber.size() == 19 && data.licenseNumber.matches('^RMGC-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$')
         && data.activationCodeHash is string && data.activationCodeHash.size() >= 16 && data.activationCodeHash.size() <= 200
         && data.activationCodeSalt is string && data.activationCodeSalt.size() >= 8 && data.activationCodeSalt.size() <= 128
@@ -243,7 +247,7 @@ service cloud.firestore {
         allow get: if isSignedIn() && isValidId(userId) && isValidId(accountId) && (isOwner(userId) || isAdmin());
         allow list: if isSignedIn() && (
           (request.auth.uid == userId && existing().ownerUid == request.auth.uid) ||
-          isAdmin()
+          isBootstrappedAdmin()
         );
         allow create: if isVerifiedUser()
           && isValidId(userId)
@@ -297,7 +301,7 @@ service cloud.firestore {
             && (isActiveAccountOwner(userId, accountId) || isAdmin());
           allow list: if isSignedIn() && (
             (request.auth.uid == userId && existing().ownerUid == request.auth.uid) ||
-            isAdmin()
+            isBootstrappedAdmin()
           );
           allow create: if isVerifiedUser()
             && isValidId(userId)

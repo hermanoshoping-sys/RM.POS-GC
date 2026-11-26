@@ -11,10 +11,10 @@ import {
   collection,
   deleteDoc,
   doc,
-  getDoc,
   getDocs,
   onSnapshot,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   Timestamp,
@@ -107,9 +107,17 @@ export function getStableDeviceId(): string {
   }
 }
 
-function clampString(val: string, maxLen: number): string {
+function clampString(val: string, maxBytes: number): string {
   const trimmed = val.trim();
-  return trimmed.length > maxLen ? trimmed.slice(0, maxLen) : trimmed;
+  const encoder = new TextEncoder();
+  if (encoder.encode(trimmed).length <= maxBytes) return trimmed;
+  let out = '';
+  for (const ch of trimmed) {
+    const next = out + ch;
+    if (encoder.encode(next).length > maxBytes) break;
+    out = next;
+  }
+  return out;
 }
 
 function timestampToIso(ts: unknown): string {
@@ -240,6 +248,19 @@ export function formatFirebaseAuthError(error: unknown, lang: 'ar' | 'fr'): stri
       ? `تم بلوغ الحد اليومي المجاني لقاعدة البيانات السحابية. ستتجدد الحصة غداً (${upgradeUrl}).`
       : `Quota quotidien gratuit Firestore atteint. Réinitialisation demain (${upgradeUrl}).`;
   }
+  if (msg.startsWith('{') && msg.includes('"operationType"')) {
+    try {
+      const parsed = JSON.parse(msg) as { error?: string };
+      if (parsed.error?.toLowerCase().includes('permission')) {
+        return lang === 'ar'
+          ? 'تعذّرت مزامنة الحساب السحابي بسبب صلاحيات قاعدة البيانات — يرجى إعادة المحاولة.'
+          : 'Erreur d’autorisation lors de la synchronisation cloud — veuillez réessayer.';
+      }
+      if (parsed.error) return parsed.error;
+    } catch {
+      // Fall through to raw message
+    }
+  }
   return msg;
 }
 
@@ -286,49 +307,72 @@ export async function signOutCloudEmail(): Promise<void> {
   await signOut(firebaseAuth);
 }
 
+const profileSyncLocks = new Map<string, Promise<void>>();
+
 /**
  * Ensures `/users/{uid}` exists and matches our blueprint constraints strictly.
+ * Uses a per-UID promise lock + Firestore `runTransaction` so concurrent login hooks
+ * (`signInWithPopup` + `onAuthStateChanged`) can NEVER race `setDoc` vs `updateDoc`
+ * and collide on immutable `createdAt`.
  */
 export async function ensureCloudUserProfile(
   user: FirebaseUser,
   activeAccountId?: string
 ): Promise<void> {
   if (!user.email || !user.emailVerified) return;
-  const userPath = `users/${user.uid}`;
-  const ref = doc(firestoreDb, 'users', user.uid);
-  const cleanEmail = clampString(normalizeEmail(user.email), 160);
-  const cleanName = clampString(user.displayName || cleanEmail.split('@')[0] || 'Owner', 120);
-  const cleanPhoto = user.photoURL ? clampString(user.photoURL, 500) : undefined;
 
+  const prev = profileSyncLocks.get(user.uid) ?? Promise.resolve();
+  const next = prev
+    .catch(() => undefined)
+    .then(async () => {
+      const userPath = `users/${user.uid}`;
+      const ref = doc(firestoreDb, 'users', user.uid);
+      const cleanEmail = clampString(normalizeEmail(user.email!), 160);
+      const cleanName = clampString(
+        user.displayName || cleanEmail.split('@')[0] || 'Owner',
+        240
+      );
+      const cleanPhoto = user.photoURL ? clampString(user.photoURL, 1024) : undefined;
+      const validActiveAccId =
+        activeAccountId && VALID_ID_REGEX.test(activeAccountId) ? activeAccountId : undefined;
+
+      try {
+        await runTransaction(firestoreDb, async (tx) => {
+          const snap = await tx.get(ref);
+          if (!snap.exists()) {
+            const payload: Record<string, unknown> = {
+              uid: user.uid,
+              email: cleanEmail,
+              displayName: cleanName,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            };
+            if (cleanPhoto) payload.photoURL = cleanPhoto;
+            if (validActiveAccId) payload.activeAccountId = validActiveAccId;
+            tx.set(ref, payload);
+          } else {
+            const patch: Record<string, unknown> = {
+              email: cleanEmail,
+              displayName: cleanName,
+              updatedAt: serverTimestamp(),
+            };
+            if (cleanPhoto) patch.photoURL = cleanPhoto;
+            if (validActiveAccId) patch.activeAccountId = validActiveAccId;
+            tx.update(ref, patch);
+          }
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, userPath);
+      }
+    });
+
+  profileSyncLocks.set(user.uid, next);
   try {
-    const snap = await getDoc(ref);
-    if (!snap.exists()) {
-      const payload: Record<string, unknown> = {
-        uid: user.uid,
-        email: cleanEmail,
-        displayName: cleanName,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      };
-      if (cleanPhoto) payload.photoURL = cleanPhoto;
-      if (activeAccountId && VALID_ID_REGEX.test(activeAccountId)) {
-        payload.activeAccountId = activeAccountId;
-      }
-      await setDoc(ref, payload);
-    } else {
-      const patch: Record<string, unknown> = {
-        email: cleanEmail,
-        displayName: cleanName,
-        updatedAt: serverTimestamp(),
-      };
-      if (cleanPhoto) patch.photoURL = cleanPhoto;
-      if (activeAccountId && VALID_ID_REGEX.test(activeAccountId)) {
-        patch.activeAccountId = activeAccountId;
-      }
-      await updateDoc(ref, patch);
+    await next;
+  } finally {
+    if (profileSyncLocks.get(user.uid) === next) {
+      profileSyncLocks.delete(user.uid);
     }
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, userPath);
   }
 }
 
@@ -395,48 +439,42 @@ export async function publishActiveAccountToCloud(
   const accountRef = doc(firestoreDb, 'users', uid, 'accounts', account.accountId);
 
   let existingRevision = 0;
-  let accountExists = false;
+  // Atomically check & create the parent CloudAccount document BEFORE writing tableChunks (Master Gate)
   try {
-    const existingSnap = await getDoc(accountRef);
-    if (existingSnap.exists()) {
-      accountExists = true;
-      const existingData = existingSnap.data() as CloudAccountDoc;
-      existingRevision = Number(existingData.syncRevision) || 0;
-    }
+    existingRevision = await runTransaction(firestoreDb, async (tx) => {
+      const existingSnap = await tx.get(accountRef);
+      if (existingSnap.exists()) {
+        const existingData = existingSnap.data() as CloudAccountDoc;
+        return Number(existingData.syncRevision) || 0;
+      }
+      const createPayload: Record<string, unknown> = {
+        accountId: account.accountId,
+        ownerUid: uid,
+        ownerEmail: email,
+        ownerName: clampString(account.ownerName || user.displayName || 'Owner', 240),
+        storeName: clampString(account.storeName || 'RM.POS GC', 280),
+        licenseNumber: account.licenseNumber,
+        activationCodeHash: clampString(account.activationCodeHash, 200),
+        activationCodeSalt: clampString(account.activationCodeSalt, 128),
+        licenseStatus: 'active',
+        activatedAt: clampString(account.activatedAt || new Date().toISOString(), 40),
+        syncRevision: 0,
+        lastSyncedDeviceId: deviceId,
+        lastSyncedAt: serverTimestamp(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      if (account.ownerPhone && account.ownerPhone.trim().length > 0) {
+        createPayload.ownerPhone = clampString(account.ownerPhone, 32);
+      }
+      tx.set(accountRef, createPayload);
+      return 0;
+    });
   } catch (error) {
-    handleFirestoreError(error, OperationType.GET, accountPath);
+    handleFirestoreError(error, OperationType.WRITE, accountPath);
   }
 
   const nextRevision = Math.max(existingRevision, account.syncRevision ?? 0) + 1;
-
-  // Ensure the parent CloudAccount document exists BEFORE writing tableChunks (Master Gate requirement)
-  if (!accountExists) {
-    const createPayload: Record<string, unknown> = {
-      accountId: account.accountId,
-      ownerUid: uid,
-      ownerEmail: email,
-      ownerName: clampString(account.ownerName || user.displayName || 'Owner', 120),
-      storeName: clampString(account.storeName || 'RM.POS GC', 140),
-      licenseNumber: account.licenseNumber,
-      activationCodeHash: clampString(account.activationCodeHash, 200),
-      activationCodeSalt: clampString(account.activationCodeSalt, 128),
-      licenseStatus: 'active',
-      activatedAt: clampString(account.activatedAt || new Date().toISOString(), 40),
-      syncRevision: existingRevision,
-      lastSyncedDeviceId: deviceId,
-      lastSyncedAt: serverTimestamp(),
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    };
-    if (account.ownerPhone && account.ownerPhone.trim().length > 0) {
-      createPayload.ownerPhone = clampString(account.ownerPhone, 32);
-    }
-    try {
-      await setDoc(accountRef, createPayload);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, accountPath);
-    }
-  }
 
   // Fetch existing chunk IDs so we use `updateDoc` on existing chunks (preserving immutable `createdAt`)
   // and clean up any stale chunks from tables that shrank.
@@ -540,7 +578,7 @@ export async function publishActiveAccountToCloud(
       syncRevision: nextRevision,
       lastSyncedDeviceId: deviceId,
       lastSyncedAt: serverTimestamp(),
-      storeName: clampString(account.storeName || 'RM.POS GC', 140),
+      storeName: clampString(account.storeName || 'RM.POS GC', 280),
       updatedAt: serverTimestamp(),
     });
   } catch (error) {

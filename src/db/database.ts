@@ -4,12 +4,14 @@ import {
   AppUser,
   AuditLog,
   BackupRecord,
+  CashSession,
   Category,
   Customer,
   CustomerPayment,
   Expense,
   HeldCart,
   Installment,
+  Language,
   LoginLog,
   PriceHistory,
   Product,
@@ -37,6 +39,9 @@ export const ADMIN_PERMISSIONS: UserPermissions = {
   canViewProfits: true,
   canManageSettings: true,
   canRestoreCancelled: true,
+  canOverridePrice: true,
+  canGiveDiscount: true,
+  maxDiscountPercent: 100,
 };
 
 export const CASHIER_PERMISSIONS: UserPermissions = {
@@ -52,6 +57,9 @@ export const CASHIER_PERMISSIONS: UserPermissions = {
   canViewProfits: false,
   canManageSettings: false,
   canRestoreCancelled: false,
+  canOverridePrice: false,
+  canGiveDiscount: false,
+  maxDiscountPercent: 0,
 };
 
 export const MANAGER_PERMISSIONS: UserPermissions = {
@@ -67,6 +75,9 @@ export const MANAGER_PERMISSIONS: UserPermissions = {
   canViewProfits: true,
   canManageSettings: false,
   canRestoreCancelled: true,
+  canOverridePrice: true,
+  canGiveDiscount: true,
+  maxDiscountPercent: 30,
 };
 
 export function createDefaultSettings(): AppSettings {
@@ -75,27 +86,27 @@ export function createDefaultSettings(): AppSettings {
     storeInfo: {
       storeName: 'سوبر مارشي النور',
       logoDataUrl: '',
-      managerName: 'محمد العلمي',
+      managerName: '',
       activityInfo: 'التجارة بالتقسيط والمواد الغذائية العامة',
-      address: 'شارع الحسن الثاني رقم 48',
-      phone: '0661-428910',
-      email: 'contact@annour-market.ma',
-      city: 'الدار البيضاء',
+      address: '',
+      phone: '',
+      email: '',
+      city: '',
       country: 'المغرب',
       currency: 'MAD',
-      taxId: 'ICE 002489120000045',
-      extraInvoiceInfo: 'سجل تجاري: 418920 — الباتنتا: 34219800',
+      taxId: '',
+      extraInvoiceInfo: '',
       defaultLanguage: 'ar',
       taxEnabled: false,
       defaultTaxRate: 20,
       salePrefix: 'VNT',
-      saleNextNumber: 1005,
+      saleNextNumber: 1,
       purchasePrefix: 'ACH',
-      purchaseNextNumber: 2003,
+      purchaseNextNumber: 1,
       returnPrefix: 'RET',
-      returnNextNumber: 3001,
-      customerPaymentNextRef: 3,
-      supplierPaymentNextRef: 3,
+      returnNextNumber: 1,
+      customerPaymentNextRef: 1,
+      supplierPaymentNextRef: 1,
     },
     posConfig: {
       allowNegativeStock: false,
@@ -103,7 +114,7 @@ export function createDefaultSettings(): AppSettings {
       defaultPriceTier: 'retail',
     },
     security: {
-      requireLoginOnStartup: false,
+      requireLoginOnStartup: true,
       requireDeletePassword: false,
       deletePasswordHash: '',
       deletePasswordSalt: '',
@@ -231,8 +242,9 @@ export function createDefaultSettings(): AppSettings {
       autoBackupIntervalHours: 24,
       lastAutoBackupAt: null,
       lastExternalExportAt: null,
+      externalFolderName: null,
       maxRetainedBackups: 10,
-      encryptBackupsDefault: false,
+      encryptBackupsDefault: true,
     },
   };
 }
@@ -270,6 +282,8 @@ export function normalizeSettings(saved?: Partial<AppSettings> | null): AppSetti
   };
 }
 
+export const DEFAULT_LEGACY_DB_NAME = 'MatjarProRetailDB';
+
 export class MatjarProDB extends Dexie {
   users!: Table<AppUser, number>;
   categories!: Table<Category, number>;
@@ -287,13 +301,14 @@ export class MatjarProDB extends Dexie {
   customerPayments!: Table<CustomerPayment, number>;
   supplierPayments!: Table<SupplierPayment, number>;
   expenses!: Table<Expense, number>;
+  cashSessions!: Table<CashSession, number>;
   auditLogs!: Table<AuditLog, number>;
   loginLogs!: Table<LoginLog, number>;
   backups!: Table<BackupRecord, number>;
   settings!: Table<AppSettings, number>;
 
-  constructor() {
-    super('MatjarProRetailDB');
+  constructor(dbName: string = DEFAULT_LEGACY_DB_NAME) {
+    super(dbName);
     this.version(1).stores({
       users: '++id, &username, role, isActive',
       categories: '++id, nameAr, nameFr, parentId, sortOrder',
@@ -337,10 +352,77 @@ export class MatjarProDB extends Dexie {
       backups: '++id, date, type',
       settings: 'id',
     });
+    this.version(3).stores({
+      users: '++id, &username, role, isActive',
+      categories: '++id, nameAr, nameFr, parentId, sortOrder',
+      products: '++id, name, sku, barcode, categoryId, isActive, quantity, expiryDate',
+      priceHistory: '++id, productId, changedAt',
+      customers: '++id, fullName, phone',
+      suppliers: '++id, businessName, phone',
+      saleInvoices: '++id, &invoiceNumber, date, customerId, sellerId, status, &idempotencyKey',
+      saleReturns: '++id, &returnNumber, saleInvoiceId, date, customerId',
+      installments: '++id, saleInvoiceId, customerId, dueDate, status',
+      heldCarts: '++id, createdAt',
+      purchaseInvoices: '++id, &invoiceNumber, date, supplierId, status, &idempotencyKey',
+      supplierReturns: '++id, &returnNumber, purchaseInvoiceId, date, supplierId',
+      stockMovements: '++id, date, productId, type, referenceNumber',
+      customerPayments: '++id, &refNumber, date, customerId, &idempotencyKey',
+      supplierPayments: '++id, &refNumber, date, supplierId, &idempotencyKey',
+      expenses: '++id, date, category, userId',
+      cashSessions: '++id, status, openedAt, closedAt, openedByUserId',
+      auditLogs: '++id, date, userId, entityType, action',
+      loginLogs: '++id, date, username, status',
+      backups: '++id, date, type',
+      settings: 'id',
+    });
+    this.version(4).stores({
+      users: '++id, &username, email, phone, role, isActive',
+      categories: '++id, nameAr, nameFr, parentId, sortOrder',
+      products: '++id, name, sku, barcode, categoryId, isActive, quantity, expiryDate',
+      priceHistory: '++id, productId, changedAt',
+      customers: '++id, fullName, phone',
+      suppliers: '++id, businessName, phone',
+      saleInvoices: '++id, &invoiceNumber, date, customerId, sellerId, status, &idempotencyKey',
+      saleReturns: '++id, &returnNumber, saleInvoiceId, date, customerId',
+      installments: '++id, saleInvoiceId, customerId, dueDate, status',
+      heldCarts: '++id, createdAt',
+      purchaseInvoices: '++id, &invoiceNumber, date, supplierId, status, &idempotencyKey',
+      supplierReturns: '++id, &returnNumber, purchaseInvoiceId, date, supplierId',
+      stockMovements: '++id, date, productId, type, referenceNumber',
+      customerPayments: '++id, &refNumber, date, customerId, &idempotencyKey',
+      supplierPayments: '++id, &refNumber, date, supplierId, &idempotencyKey',
+      expenses: '++id, date, category, userId',
+      cashSessions: '++id, status, openedAt, closedAt, openedByUserId',
+      auditLogs: '++id, date, userId, entityType, action',
+      loginLogs: '++id, date, username, status',
+      backups: '++id, date, type',
+      settings: 'id',
+    });
   }
 }
 
-export const db = new MatjarProDB();
+export let db = new MatjarProDB(DEFAULT_LEGACY_DB_NAME);
+
+export function getActiveDbName(): string {
+  return db.name;
+}
+
+export async function switchActiveTenantDatabase(dbName: string): Promise<void> {
+  const targetName = dbName.trim() || DEFAULT_LEGACY_DB_NAME;
+  if (db.name !== targetName) {
+    try {
+      db.close();
+    } catch {
+      // Ignore close errors if already closed
+    }
+    db = new MatjarProDB(targetName);
+  }
+  initPromise = null;
+  if (!db.isOpen()) {
+    await db.open();
+  }
+  await ensureDatabaseInitialized();
+}
 
 function daysAgoIso(days: number, hour = 10, min = 30): string {
   const d = new Date();
@@ -357,6 +439,10 @@ function daysFromNowDate(days: number): string {
 
 let initPromise: Promise<void> | null = null;
 
+export function resetDatabaseInitState(): void {
+  initPromise = null;
+}
+
 export function ensureDatabaseInitialized(): Promise<void> {
   if (!initPromise) {
     initPromise = initializeDatabaseOnce();
@@ -364,20 +450,164 @@ export function ensureDatabaseInitialized(): Promise<void> {
   return initPromise;
 }
 
+/**
+ * First-run base initialization:
+ * - Creates default settings (with requireLoginOnStartup=true & encryptBackupsDefault=true)
+ * - Ensures the default walk-in customer (#1) exists
+ * - Does NOT seed hardcoded users or demo business data (handled explicitly by the first-run wizard).
+ */
 async function initializeDatabaseOnce(): Promise<void> {
   const existingSettings = await db.settings.get(1);
-  if (existingSettings) return;
+  if (existingSettings) {
+    const walkIn = await db.customers.get(1);
+    if (!walkIn) {
+      await db.customers.put({
+        id: 1,
+        fullName: 'زبون عابر (نقدي)',
+        phone: '0000-000000',
+        address: 'البيع المباشر',
+        creditLimit: 0,
+        openingBalance: 0,
+        creditBalance: 0,
+        notes: 'حساب افتراضي للمبيعات النقدية السريعة',
+        createdAt: new Date().toISOString(),
+      });
+    }
+    return;
+  }
 
-  const adminSalt = generateSalt();
-  const adminHash = await hashPassword('admin123', adminSalt);
-  const cashierSalt = generateSalt();
-  const cashierHash = await hashPassword('1234', cashierSalt);
+  await db.transaction('rw', [db.settings, db.customers], async () => {
+    const check = await db.settings.get(1);
+    if (check) return;
+    await db.settings.put(createDefaultSettings());
+    await db.customers.put({
+      id: 1,
+      fullName: 'زبون عابر (نقدي)',
+      phone: '0000-000000',
+      address: 'البيع المباشر',
+      creditLimit: 0,
+      openingBalance: 0,
+      creditBalance: 0,
+      notes: 'حساب افتراضي للمبيعات النقدية السريعة',
+      createdAt: new Date().toISOString(),
+    });
+  });
+}
 
+export interface FirstRunSetupInput {
+  storeName: string;
+  currency: string;
+  defaultLanguage: Language;
+  adminUsername: string;
+  adminFullName: string;
+  adminEmail?: string;
+  adminPhone?: string;
+  adminPassword: string;
+  loadDemoData: boolean;
+}
+
+export async function completeFirstRunSetup(input: FirstRunSetupInput): Promise<AppUser> {
+  const username = input.adminUsername.trim();
+  const fullName = input.adminFullName.trim() || username;
+  const storeName = input.storeName.trim() || 'RM.POS GC';
+  const cleanEmail = input.adminEmail?.trim().toLowerCase() || undefined;
+  const cleanPhone = input.adminPhone?.trim() || undefined;
+  if (username.length < 3) {
+    throw new Error('اسم المستخدم يجب أن يحتوي على 3 أحرف على الأقل');
+  }
+  if (!input.adminPassword || input.adminPassword.length < 6) {
+    throw new Error('كلمة سر المدير يجب أن تتكون من 6 أحرف على الأقل');
+  }
+
+  const existingUsersCount = await db.users.count();
+  if (existingUsersCount > 0) {
+    throw new Error('تم إعداد حساب المدير مسبقاً — يرجى تسجيل الدخول');
+  }
+
+  const salt = generateSalt();
+  const hash = await hashPassword(input.adminPassword, salt);
+  const nowIso = new Date().toISOString();
+
+  let createdAdmin!: AppUser;
+
+  await db.transaction('rw', [db.users, db.settings, db.customers, db.auditLogs], async () => {
+    const currentSettings = normalizeSettings(await db.settings.get(1));
+    const adminRecord: AppUser = {
+      id: 1,
+      username,
+      ...(cleanEmail ? { email: cleanEmail } : {}),
+      ...(cleanPhone ? { phone: cleanPhone } : {}),
+      fullName,
+      role: 'admin',
+      passwordHash: hash,
+      passwordSalt: salt,
+      permissions: { ...ADMIN_PERMISSIONS },
+      isActive: true,
+      createdAt: nowIso,
+    };
+    await db.users.put(adminRecord);
+    createdAdmin = adminRecord;
+
+    const walkIn = await db.customers.get(1);
+    if (!walkIn) {
+      await db.customers.put({
+        id: 1,
+        fullName: 'زبون عابر (نقدي)',
+        phone: '0000-000000',
+        address: 'البيع المباشر',
+        creditLimit: 0,
+        openingBalance: 0,
+        creditBalance: 0,
+        notes: 'حساب افتراضي للمبيعات النقدية السريعة',
+        createdAt: nowIso,
+      });
+    }
+
+    await db.settings.put({
+      ...currentSettings,
+      id: 1,
+      storeInfo: {
+        ...currentSettings.storeInfo,
+        storeName,
+        ...(cleanEmail ? { email: cleanEmail } : {}),
+        ...(cleanPhone ? { phone: cleanPhone } : {}),
+        managerName: fullName,
+        currency: input.currency.trim() || 'MAD',
+        defaultLanguage: input.defaultLanguage,
+      },
+      security: {
+        ...currentSettings.security,
+        requireLoginOnStartup: true,
+      },
+      backupConfig: {
+        ...currentSettings.backupConfig,
+        encryptBackupsDefault: true,
+      },
+    });
+
+    await db.auditLogs.add({
+      date: nowIso,
+      userId: 1,
+      userName: fullName,
+      action: 'FIRST_RUN_SETUP',
+      entityType: 'database',
+      entityId: '1',
+      details: `إعداد النظام لأول مرة وإنشاء حساب المدير (${username})${input.loadDemoData ? ' مع تحميل البيانات التجريبية' : ' (قاعدة بيانات نظيفة)'}`,
+    });
+  });
+
+  if (input.loadDemoData) {
+    await seedOptionalDemoData(createdAdmin);
+  }
+
+  return createdAdmin;
+}
+
+export async function seedOptionalDemoData(adminUser: AppUser): Promise<void> {
   await db.transaction(
     'rw',
     [
       db.settings,
-      db.users,
       db.categories,
       db.products,
       db.customers,
@@ -389,41 +619,24 @@ async function initializeDatabaseOnce(): Promise<void> {
       db.customerPayments,
       db.supplierPayments,
       db.expenses,
-      db.auditLogs,
     ],
     async () => {
-      const check = await db.settings.get(1);
-      if (check) return;
-
-      await db.settings.put(createDefaultSettings());
-
-      await db.users.bulkAdd([
-        {
-          id: 1,
-          username: 'admin',
-          fullName: 'محمد العلمي (المدير)',
-          role: 'admin',
-          passwordHash: adminHash,
-          passwordSalt: adminSalt,
-          permissions: ADMIN_PERMISSIONS,
-          isActive: true,
-          createdAt: daysAgoIso(30),
+      const currentSettings = normalizeSettings(await db.settings.get(1));
+      await db.settings.put({
+        ...currentSettings,
+        id: 1,
+        storeInfo: {
+          ...currentSettings.storeInfo,
+          saleNextNumber: 1005,
+          purchaseNextNumber: 2003,
+          returnNextNumber: 3001,
+          customerPaymentNextRef: 3,
+          supplierPaymentNextRef: 3,
         },
-        {
-          id: 2,
-          username: 'cashier1',
-          fullName: 'سلمى بنعلي (بائعة)',
-          role: 'cashier',
-          passwordHash: cashierHash,
-          passwordSalt: cashierSalt,
-          permissions: CASHIER_PERMISSIONS,
-          isActive: true,
-          createdAt: daysAgoIso(25),
-        },
-      ]);
+      });
 
       // Categories (Parent & Sub-categories)
-      await db.categories.bulkAdd([
+      await db.categories.bulkPut([
         { id: 1, nameAr: 'المواد الغذائية الأساسية', nameFr: 'Épicerie de base', parentId: null, icon: 'wheat', description: 'الدقيق، الزيوت، السكر، الحبوب والقطاني', sortOrder: 1, createdAt: daysAgoIso(30) },
         { id: 2, nameAr: 'الزيوت والسمن', nameFr: 'Huiles & Matières grasses', parentId: 1, icon: 'droplet', description: 'زيت المائدة، زيت الزيتون والزبدة', sortOrder: 2, createdAt: daysAgoIso(30) },
         { id: 3, nameAr: 'الحليب ومشتقاته', nameFr: 'Produits laitiers', parentId: null, icon: 'milk', description: 'الحليب، الياغورت، الأجبان والزبدة', sortOrder: 3, createdAt: daysAgoIso(30) },
@@ -433,7 +646,7 @@ async function initializeDatabaseOnce(): Promise<void> {
       ]);
 
       // Products
-      await db.products.bulkAdd([
+      await db.products.bulkPut([
         { id: 1, name: 'زيت المائدة لوسيور 2 لتر', sku: 'OIL-001', barcode: '6111035000101', categoryId: 2, unit: 'قنينة', purchasePrice: 31.5, salePrice: 37.0, wholesalePrice: 34.5, secondSalePrice: 36.0, quantity: 42, minStock: 10, expiryDate: daysFromNowDate(240), lotNumber: 'LOT-26A', isActive: true, isWeighted: false, createdAt: daysAgoIso(28), updatedAt: daysAgoIso(2) },
         { id: 2, name: 'حليب سنطرال كامل الدسم 1 لتر', sku: 'DAI-001', barcode: '6111035000202', categoryId: 3, unit: 'علبة', purchasePrice: 8.4, salePrice: 10.0, wholesalePrice: 9.2, secondSalePrice: 9.5, quantity: 65, minStock: 20, expiryDate: daysFromNowDate(12), lotNumber: 'LOT-L88', isActive: true, isWeighted: false, createdAt: daysAgoIso(28), updatedAt: daysAgoIso(1) },
         { id: 3, name: 'سكر كوسومار قوالب 2 كغ', sku: 'GRO-001', barcode: '6111035000303', categoryId: 1, unit: 'علبة', purchasePrice: 11.2, salePrice: 13.5, wholesalePrice: 12.5, secondSalePrice: 13.0, quantity: 38, minStock: 15, expiryDate: daysFromNowDate(400), lotNumber: 'LOT-S12', isActive: true, isWeighted: false, createdAt: daysAgoIso(28), updatedAt: daysAgoIso(3) },
@@ -447,18 +660,18 @@ async function initializeDatabaseOnce(): Promise<void> {
       ]);
 
       // Customers
-      await db.customers.bulkAdd([
-        { id: 1, fullName: 'زبون عابر (نقدي)', phone: '0000-000000', address: 'البيع المباشر', creditLimit: 0, openingBalance: 0, notes: 'حساب افتراضي للمبيعات النقدية السريعة', createdAt: daysAgoIso(30) },
-        { id: 2, fullName: 'أحمد الإدريسي', phone: '0662-118293', address: 'حي المعاريف، الزنقة 12', creditLimit: 3000, openingBalance: 0, notes: 'زبون منتظم — دفع شهري', createdAt: daysAgoIso(25) },
-        { id: 3, fullName: 'فاطمة الزهراء المنصوري', phone: '0671-843210', address: 'حي الألفة، الإقامة 4', creditLimit: 2000, openingBalance: 0, notes: 'تشتري بالتقسيط للأسر', createdAt: daysAgoIso(20) },
-        { id: 4, fullName: 'مقهى السعادة (يوسف التازي)', phone: '0668-905512', address: 'شارع الزرقطوني 110', creditLimit: 5000, openingBalance: 0, notes: 'تموين يومي بالحليب والسكر والشاي', createdAt: daysAgoIso(18) },
+      await db.customers.bulkPut([
+        { id: 1, fullName: 'زبون عابر (نقدي)', phone: '0000-000000', address: 'البيع المباشر', creditLimit: 0, openingBalance: 0, creditBalance: 0, notes: 'حساب افتراضي للمبيعات النقدية السريعة', createdAt: daysAgoIso(30) },
+        { id: 2, fullName: 'أحمد الإدريسي', phone: '0662-118293', address: 'حي المعاريف، الزنقة 12', creditLimit: 3000, openingBalance: 0, creditBalance: 0, notes: 'زبون منتظم — دفع شهري', createdAt: daysAgoIso(25) },
+        { id: 3, fullName: 'فاطمة الزهراء المنصوري', phone: '0671-843210', address: 'حي الألفة، الإقامة 4', creditLimit: 2000, openingBalance: 0, creditBalance: 0, notes: 'تشتري بالتقسيط للأسر', createdAt: daysAgoIso(20) },
+        { id: 4, fullName: 'مقهى السعادة (يوسف التازي)', phone: '0668-905512', address: 'شارع الزرقطوني 110', creditLimit: 5000, openingBalance: 0, creditBalance: 0, notes: 'تموين يومي بالحليب والسكر والشاي', createdAt: daysAgoIso(18) },
       ]);
 
       // Suppliers
-      await db.suppliers.bulkAdd([
-        { id: 1, businessName: 'شركة الأطلس لتوزيع المواد الغذائية', phone: '0522-349811', address: 'المنطقة الصناعية عين السبع', taxId: 'ICE 001523980000012', openingBalance: 0, notes: 'مورد الزيوت والدقيق والسكر', createdAt: daysAgoIso(30) },
-        { id: 2, businessName: 'تعاونية الشاوية للألبان', phone: '0522-784512', address: 'طريق الجديدة كلم 9', taxId: 'ICE 001984210000088', openingBalance: 0, notes: 'توصيل يومي لمنتجات الحليب والأجبان', createdAt: daysAgoIso(28) },
-        { id: 3, businessName: 'مؤسسة الصفا لمواد التنظيف والمشروبات', phone: '0522-612090', address: 'سيدي معروف، الدار البيضاء', taxId: 'ICE 002109440000031', openingBalance: 0, notes: 'دفع خلال 30 يوماً', createdAt: daysAgoIso(25) },
+      await db.suppliers.bulkPut([
+        { id: 1, businessName: 'شركة الأطلس لتوزيع المواد الغذائية', phone: '0522-349811', address: 'المنطقة الصناعية عين السبع', taxId: 'ICE 001523980000012', openingBalance: 0, creditBalance: 0, notes: 'مورد الزيوت والدقيق والسكر', createdAt: daysAgoIso(30) },
+        { id: 2, businessName: 'تعاونية الشاوية للألبان', phone: '0522-784512', address: 'طريق الجديدة كلم 9', taxId: 'ICE 001984210000088', openingBalance: 0, creditBalance: 0, notes: 'توصيل يومي لمنتجات الحليب والأجبان', createdAt: daysAgoIso(28) },
+        { id: 3, businessName: 'مؤسسة الصفا لمواد التنظيف والمشروبات', phone: '0522-612090', address: 'سيدي معروف، الدار البيضاء', taxId: 'ICE 002109440000031', openingBalance: 0, creditBalance: 0, notes: 'دفع خلال 30 يوماً', createdAt: daysAgoIso(25) },
       ]);
 
       // Purchase Invoices
@@ -782,23 +995,13 @@ async function initializeDatabaseOnce(): Promise<void> {
 
       // Stock Movements matching purchases & sales
       await db.stockMovements.bulkAdd([
-        { date: daysAgoIso(10, 9, 15), productId: 1, productName: 'زيت المائدة لوسيور 2 لتر', barcode: '6111035000101', type: 'purchase', quantityDelta: 50, beforeQty: 0, afterQty: 50, unitCost: 31.5, unitPrice: 37, referenceNumber: 'ACH-2001', userId: 1, userName: 'محمد العلمي (المدير)' },
-        { date: daysAgoIso(5, 11, 0), productId: 2, productName: 'حليب سنطرال كامل الدسم 1 لتر', barcode: '6111035000202', type: 'purchase', quantityDelta: 80, beforeQty: 6, afterQty: 86, unitCost: 8.4, unitPrice: 10, referenceNumber: 'ACH-2002', userId: 1, userName: 'محمد العلمي (المدير)' },
-        { date: daysAgoIso(4, 14, 20), productId: 1, productName: 'زيت المائدة لوسيور 2 لتر', barcode: '6111035000101', type: 'sale', quantityDelta: -4, beforeQty: 50, afterQty: 46, unitCost: 31.5, unitPrice: 37, referenceNumber: 'VNT-1001', userId: 1, userName: 'محمد العلمي (المدير)' },
-        { date: daysAgoIso(2, 16, 45), productId: 2, productName: 'حليب سنطرال كامل الدسم 1 لتر', barcode: '6111035000202', type: 'sale', quantityDelta: -15, beforeQty: 86, afterQty: 71, unitCost: 8.4, unitPrice: 10, referenceNumber: 'VNT-1002', userId: 2, userName: 'سلمى بنعلي (بائعة)' },
-        { date: daysAgoIso(0, 9, 40), productId: 1, productName: 'زيت المائدة لوسيور 2 لتر', barcode: '6111035000101', type: 'sale', quantityDelta: -4, beforeQty: 46, afterQty: 42, unitCost: 31.5, unitPrice: 37, referenceNumber: 'VNT-1004', userId: 1, userName: 'محمد العلمي (المدير)' },
-        { date: daysAgoIso(0, 9, 40), productId: 2, productName: 'حليب سنطرال كامل الدسم 1 لتر', barcode: '6111035000202', type: 'sale', quantityDelta: -6, beforeQty: 71, afterQty: 65, unitCost: 8.4, unitPrice: 10, referenceNumber: 'VNT-1004', userId: 1, userName: 'محمد العلمي (المدير)' },
+        { date: daysAgoIso(10, 9, 15), productId: 1, productName: 'زيت المائدة لوسيور 2 لتر', barcode: '6111035000101', type: 'purchase', quantityDelta: 50, beforeQty: 0, afterQty: 50, unitCost: 31.5, unitPrice: 37, referenceNumber: 'ACH-2001', userId: adminUser.id ?? 1, userName: adminUser.fullName },
+        { date: daysAgoIso(5, 11, 0), productId: 2, productName: 'حليب سنطرال كامل الدسم 1 لتر', barcode: '6111035000202', type: 'purchase', quantityDelta: 80, beforeQty: 6, afterQty: 86, unitCost: 8.4, unitPrice: 10, referenceNumber: 'ACH-2002', userId: adminUser.id ?? 1, userName: adminUser.fullName },
+        { date: daysAgoIso(4, 14, 20), productId: 1, productName: 'زيت المائدة لوسيور 2 لتر', barcode: '6111035000101', type: 'sale', quantityDelta: -4, beforeQty: 50, afterQty: 46, unitCost: 31.5, unitPrice: 37, referenceNumber: 'VNT-1001', userId: adminUser.id ?? 1, userName: adminUser.fullName },
+        { date: daysAgoIso(2, 16, 45), productId: 2, productName: 'حليب سنطرال كامل الدسم 1 لتر', barcode: '6111035000202', type: 'sale', quantityDelta: -15, beforeQty: 86, afterQty: 71, unitCost: 8.4, unitPrice: 10, referenceNumber: 'VNT-1002', userId: adminUser.id ?? 1, userName: adminUser.fullName },
+        { date: daysAgoIso(0, 9, 40), productId: 1, productName: 'زيت المائدة لوسيور 2 لتر', barcode: '6111035000101', type: 'sale', quantityDelta: -4, beforeQty: 46, afterQty: 42, unitCost: 31.5, unitPrice: 37, referenceNumber: 'VNT-1004', userId: adminUser.id ?? 1, userName: adminUser.fullName },
+        { date: daysAgoIso(0, 9, 40), productId: 2, productName: 'حليب سنطرال كامل الدسم 1 لتر', barcode: '6111035000202', type: 'sale', quantityDelta: -6, beforeQty: 71, afterQty: 65, unitCost: 8.4, unitPrice: 10, referenceNumber: 'VNT-1004', userId: adminUser.id ?? 1, userName: adminUser.fullName },
       ]);
-
-      await db.auditLogs.add({
-        date: daysAgoIso(0, 9, 0),
-        userId: 1,
-        userName: 'محمد العلمي (المدير)',
-        action: 'SYSTEM_INIT',
-        entityType: 'database',
-        entityId: '1',
-        details: 'تهيئة قاعدة البيانات المحلية بنجاح مع بيانات متجر نموذجية جاهزة للعمل الفعلي',
-      });
     }
   );
 }

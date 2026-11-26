@@ -1,6 +1,14 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, ensureDatabaseInitialized, normalizeSettings } from '../db/database';
+import {
+  db,
+  normalizeSettings,
+  switchActiveTenantDatabase,
+} from '../db/database';
+import {
+  ensureLegacyAccountRegistered,
+  listRegisteredAccounts,
+} from '../db/accountsDb';
 import { createBackupRecord } from '../db/operations';
 import {
   AppSettings,
@@ -15,9 +23,12 @@ import {
   Supplier,
   SupplierPayment,
   SupplierReturn,
+  TenantAccount,
 } from '../types';
 import { verifyPassword } from '../utils/crypto';
 import { canAccessSection } from '../utils/permissions';
+
+const LAST_ACCOUNT_KEY = 'rmpos_last_account_id_v1';
 
 export type PrintableDocument =
   | { type: 'sale_invoice'; invoice: SaleInvoice; format?: 'a4' | '80mm' | '58mm' }
@@ -70,6 +81,19 @@ interface DeleteGuardRequest {
 
 interface AppContextValue {
   ready: boolean;
+  needsFirstRunSetup: boolean;
+  setNeedsFirstRunSetup: (needs: boolean) => void;
+  accounts: TenantAccount[];
+  activeAccount: TenantAccount | null;
+  authPortalMode: 'login' | 'register';
+  setAuthPortalMode: (mode: 'login' | 'register') => void;
+  refreshAccounts: () => Promise<TenantAccount[]>;
+  activateAccountSession: (
+    account: TenantAccount,
+    user: AppUser,
+    backupPassphrase?: string | null
+  ) => Promise<void>;
+  signOutAccount: (mode?: 'login' | 'register') => void;
   lang: Language;
   setLang: (lang: Language) => void;
   activeSection: SectionId;
@@ -98,16 +122,43 @@ interface AppContextValue {
   storageInfo: StoragePersistenceInfo;
   requestPersistentStorage: () => Promise<boolean>;
   runAutoBackupNow: (silent?: boolean) => Promise<boolean>;
+  hasSessionBackupPassphrase: boolean;
+  getSessionBackupPassphrase: () => string | null;
+  setSessionBackupPassphrase: (pass: string | null) => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
 
+async function syncOverdueInstallmentsInActiveDb(): Promise<void> {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const openInsts = await db.installments.toArray();
+  const overdueIds = openInsts
+    .filter(
+      (i) =>
+        i.id &&
+        i.remainingAmount > 0.005 &&
+        i.status !== 'overdue' &&
+        i.dueDate < todayIso
+    )
+    .map((i) => i.id!);
+  if (overdueIds.length > 0) {
+    await Promise.all(
+      overdueIds.map((id) => db.installments.update(id, { status: 'overdue' }))
+    );
+  }
+}
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [ready, setReady] = useState(false);
+  const [needsFirstRunSetup, setNeedsFirstRunSetup] = useState(false);
+  const [accounts, setAccounts] = useState<TenantAccount[]>([]);
+  const [activeAccount, setActiveAccount] = useState<TenantAccount | null>(null);
+  const [authPortalMode, setAuthPortalMode] = useState<'login' | 'register'>('login');
   const [lang, setLangState] = useState<Language>('ar');
   const [activeSection, setActiveSectionState] = useState<SectionId>('home');
   const [currentUser, setCurrentUserState] = useState<AppUser | null>(null);
-  const [isLocked, setIsLocked] = useState(false);
+  const [isLocked, setIsLockedState] = useState(true);
+  const [hasSessionBackupPassphrase, setHasSessionBackupPassphrase] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [printDoc, setPrintDoc] = useState<PrintableDocument | null>(null);
   const [guardRequest, setGuardRequest] = useState<DeleteGuardRequest | null>(null);
@@ -120,8 +171,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const idleTimerRef = useRef<number | null>(null);
   const runningAutoBackupRef = useRef(false);
+  // Keep backup encryption passphrase in memory ONLY — never persisted to disk/localStorage
+  const sessionBackupPassphraseRef = useRef<string | null>(null);
 
-  const liveSettings = useLiveQuery(() => db.settings.get(1), []);
+  const setSessionBackupPassphrase = useCallback((pass: string | null) => {
+    const clean = pass && pass.trim().length > 0 ? pass.trim() : null;
+    sessionBackupPassphraseRef.current = clean;
+    setHasSessionBackupPassphrase(Boolean(clean));
+  }, []);
+
+  const getSessionBackupPassphrase = useCallback(() => sessionBackupPassphraseRef.current, []);
+
+  const setIsLocked = useCallback((locked: boolean) => {
+    setIsLockedState(locked);
+    if (locked) {
+      sessionBackupPassphraseRef.current = null;
+      setHasSessionBackupPassphrase(false);
+    }
+  }, []);
+
+  const refreshAccounts = useCallback(async (): Promise<TenantAccount[]> => {
+    const list = await listRegisteredAccounts();
+    setAccounts(list);
+    return list;
+  }, []);
+
+  const liveSettings = useLiveQuery(
+    async () => (activeAccount ? await db.settings.get(1) : undefined),
+    [activeAccount?.accountId, ready]
+  );
   const settings = React.useMemo(() => normalizeSettings(liveSettings), [liveSettings]);
 
   const notify = useCallback((message: string, type: ToastMessage['type'] = 'success') => {
@@ -163,33 +241,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [refreshStorageEstimate]);
 
-  // Boot DB, sync overdue installments, and request browser persistent storage
+  // Boot multi-tenant accounts registry, migrate legacy DB if present, and request persistent storage
   useEffect(() => {
     let active = true;
-    ensureDatabaseInitialized().then(async () => {
+    (async () => {
+      await ensureLegacyAccountRegistered();
+      const registered = await listRegisteredAccounts();
       if (!active) return;
-      const savedSettings = await db.settings.get(1);
-      if (savedSettings?.storeInfo.defaultLanguage) {
-        setLangState(savedSettings.storeInfo.defaultLanguage);
-      }
 
-      // Sync overdue statuses for pending/partial installments past dueDate
-      const todayIso = new Date().toISOString().slice(0, 10);
-      const openInsts = await db.installments.toArray();
-      const overdueIds = openInsts
-        .filter(
-          (i) =>
-            i.id &&
-            i.remainingAmount > 0.005 &&
-            i.status !== 'overdue' &&
-            i.dueDate < todayIso
-        )
-        .map((i) => i.id!);
-      if (overdueIds.length > 0) {
-        await Promise.all(
-          overdueIds.map((id) => db.installments.update(id, { status: 'overdue' }))
-        );
-      }
+      setAccounts(registered);
 
       // Request persistent storage automatically so browsers are less likely to evict IndexedDB
       if (typeof navigator !== 'undefined' && navigator.storage) {
@@ -206,43 +266,128 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         await refreshStorageEstimate();
       }
 
-      const admin =
-        (await db.users.where('username').equals('admin').first()) ??
-        (await db.users.toCollection().first());
-      if (admin) {
-        setCurrentUserState(admin);
+      if (registered.length === 0) {
+        setNeedsFirstRunSetup(true);
+        setAuthPortalMode('register');
+        setActiveAccount(null);
+        setCurrentUserState(null);
+        setIsLockedState(true);
+      } else {
+        let savedLastId: string | null = null;
+        try {
+          savedLastId = window.localStorage.getItem(LAST_ACCOUNT_KEY);
+        } catch {
+          savedLastId = null;
+        }
+        const preferred =
+          registered.find((a) => a.accountId === savedLastId) ?? registered[0];
+        await switchActiveTenantDatabase(preferred.dbName);
+        if (!active) return;
+
+        const savedSettings = await db.settings.get(1);
+        if (savedSettings?.storeInfo.defaultLanguage) {
+          setLangState(savedSettings.storeInfo.defaultLanguage);
+        }
+        await syncOverdueInstallmentsInActiveDb();
+
+        setActiveAccount(preferred);
+        setNeedsFirstRunSetup(false);
+        setAuthPortalMode('login');
+        // Never auto-login; require explicit authentication on startup
+        setCurrentUserState(null);
+        setIsLockedState(true);
       }
-      if (savedSettings?.security.requireLoginOnStartup) {
-        setIsLocked(true);
-      }
+
       setReady(true);
-    });
+    })();
     return () => {
       active = false;
     };
   }, [refreshStorageEstimate]);
 
-  // Real Automatic Backup Scheduler (checks on startup + every 5 minutes)
+  const activateAccountSession = useCallback(
+    async (account: TenantAccount, user: AppUser, backupPassphrase?: string | null) => {
+      await switchActiveTenantDatabase(account.dbName);
+      await syncOverdueInstallmentsInActiveDb();
+      const savedSettings = await db.settings.get(1);
+      if (savedSettings?.storeInfo.defaultLanguage) {
+        setLangState(savedSettings.storeInfo.defaultLanguage);
+      }
+      try {
+        window.localStorage.setItem(LAST_ACCOUNT_KEY, account.accountId);
+      } catch {
+        // Ignore storage errors
+      }
+      const latestAccounts = await listRegisteredAccounts();
+      setAccounts(latestAccounts);
+      const freshAccount =
+        latestAccounts.find((a) => a.accountId === account.accountId) ?? account;
+      setActiveAccount(freshAccount);
+      setNeedsFirstRunSetup(false);
+      setAuthPortalMode('login');
+      if (backupPassphrase !== undefined) {
+        setSessionBackupPassphrase(backupPassphrase);
+      }
+      setCurrentUserState(user);
+      setActiveSectionState(canAccessSection(user, 'home') ? 'home' : 'pos');
+      setIsLockedState(false);
+    },
+    [setSessionBackupPassphrase]
+  );
+
+  const signOutAccount = useCallback((mode: 'login' | 'register' = 'login') => {
+    sessionBackupPassphraseRef.current = null;
+    setHasSessionBackupPassphrase(false);
+    setCurrentUserState(null);
+    setActiveAccount(null);
+    setActiveSectionState('home');
+    setAuthPortalMode(mode);
+    setIsLockedState(true);
+  }, []);
+
+  // Real Automatic External Backup Scheduler (checks on startup + every 5 minutes)
   const runAutoBackupNow = useCallback(
     async (silent = false): Promise<boolean> => {
       if (runningAutoBackupRef.current) return false;
-      const actor =
-        currentUser ??
-        (await db.users.where('username').equals('admin').first()) ??
-        (await db.users.toCollection().first());
-      if (!actor) return false;
+      if (!currentUser || !activeAccount || isLocked || needsFirstRunSetup) return false;
 
       runningAutoBackupRef.current = true;
       try {
+        const latestSettings = normalizeSettings(await db.settings.get(1));
+        const pass = sessionBackupPassphraseRef.current;
+        if (latestSettings.backupConfig.encryptBackupsDefault && !pass) {
+          if (!silent) {
+            notify(
+              lang === 'ar'
+                ? 'التشفير مفعّل افتراضياً — أدخل كلمة مرور النسخ الاحتياطي في الإعدادات أولاً'
+                : 'Le chiffrement est actif par défaut — définissez un mot de passe de sauvegarde dans Paramètres',
+              'warning'
+            );
+          }
+          return false;
+        }
+
         const now = new Date();
-        const label = `نسخة تلقائية — ${now.toLocaleDateString('ar-MA')} ${now.toLocaleTimeString('ar-MA', { hour: '2-digit', minute: '2-digit' })}`;
-        await createBackupRecord('auto', label, null, actor);
+        const label = `نسخة تلقائية (${activeAccount.storeName}) — ${now.toLocaleDateString('ar-MA')} ${now.toLocaleTimeString('ar-MA', { hour: '2-digit', minute: '2-digit' })}`;
+        const res = await createBackupRecord('auto', label, pass, currentUser, {
+          allowUnencryptedFallback: !latestSettings.backupConfig.encryptBackupsDefault,
+        });
         await refreshStorageEstimate();
         if (!silent) {
+          const where =
+            res.storageLocation === 'directory'
+              ? lang === 'ar'
+                ? `في المجلد الخارجي (${res.folderName || ''})`
+                : `dans le dossier externe (${res.folderName || ''})`
+              : res.storageLocation === 'download'
+                ? lang === 'ar'
+                  ? 'وتم تنزيل الملف اليومي'
+                  : 'et téléchargée localement'
+                : '';
           notify(
             lang === 'ar'
-              ? 'تم إنشاء نسخة احتياطية محلية تلقائية بنجاح'
-              : 'Sauvegarde locale automatique créée avec succès',
+              ? `تم إنشاء نسخة احتياطية تلقائية${res.encrypted ? ' مشفرة' : ''} ${where}`
+              : `Sauvegarde automatique${res.encrypted ? ' chiffrée' : ''} créée ${where}`,
             'info'
           );
         }
@@ -256,11 +401,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         runningAutoBackupRef.current = false;
       }
     },
-    [currentUser, lang, notify, refreshStorageEstimate]
+    [currentUser, activeAccount, isLocked, needsFirstRunSetup, lang, notify, refreshStorageEstimate]
   );
 
   useEffect(() => {
-    if (!ready || !settings.backupConfig.autoBackupEnabled) return;
+    if (
+      !ready ||
+      needsFirstRunSetup ||
+      isLocked ||
+      !currentUser ||
+      !activeAccount ||
+      !settings.backupConfig.autoBackupEnabled
+    ) {
+      return;
+    }
 
     const checkAndRunAutoBackup = async () => {
       const latestSettings = await db.settings.get(1);
@@ -288,6 +442,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [
     ready,
+    needsFirstRunSetup,
+    isLocked,
+    currentUser,
+    activeAccount,
     settings.backupConfig.autoBackupEnabled,
     settings.backupConfig.autoBackupIntervalHours,
     runAutoBackupNow,
@@ -302,7 +460,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Auto-lock after idle minutes if configured in Security
   useEffect(() => {
     const minutes = settings.security.autoLockMinutes;
-    if (!minutes || minutes <= 0 || isLocked) return;
+    if (!minutes || minutes <= 0 || isLocked || !activeAccount) return;
 
     const resetTimer = () => {
       if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
@@ -326,7 +484,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
       events.forEach((ev) => window.removeEventListener(ev, resetTimer));
     };
-  }, [settings.security.autoLockMinutes, isLocked, currentUser]);
+  }, [settings.security.autoLockMinutes, isLocked, currentUser, activeAccount, setIsLocked]);
 
   const setActiveSection = useCallback(
     (sec: SectionId) => {
@@ -417,6 +575,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     <AppContext.Provider
       value={{
         ready,
+        needsFirstRunSetup,
+        setNeedsFirstRunSetup,
+        accounts,
+        activeAccount,
+        authPortalMode,
+        setAuthPortalMode,
+        refreshAccounts,
+        activateAccountSession,
+        signOutAccount,
         lang,
         setLang,
         activeSection,
@@ -439,6 +606,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         storageInfo,
         requestPersistentStorage,
         runAutoBackupNow,
+        hasSessionBackupPassphrase,
+        getSessionBackupPassphrase,
+        setSessionBackupPassphrase,
       }}
     >
       {children}

@@ -35,11 +35,16 @@ export interface UserPermissions {
   canViewProfits: boolean;
   canManageSettings: boolean;
   canRestoreCancelled: boolean;
+  canOverridePrice: boolean;
+  canGiveDiscount: boolean;
+  maxDiscountPercent: number; // 0-100 ceiling
 }
 
 export interface AppUser {
   id?: number;
   username: string;
+  email?: string;
+  phone?: string;
   fullName: string;
   role: UserRole;
   passwordHash: string;
@@ -47,6 +52,33 @@ export interface AppUser {
   permissions: UserPermissions;
   isActive: boolean;
   createdAt: string;
+}
+
+export interface TenantAccount {
+  accountId: string;
+  storeName: string;
+  ownerName: string;
+  ownerEmail?: string;
+  ownerPhone?: string;
+  licenseNumber: string;
+  activationCodeHash: string;
+  activationCodeSalt: string;
+  licenseStatus: 'active' | 'suspended';
+  activatedAt: string;
+  dbName: string;
+  createdAt: string;
+}
+
+export interface AccountMemberIndex {
+  id?: number;
+  accountId: string;
+  userId: number;
+  username: string;
+  email?: string;
+  phone?: string;
+  fullName: string;
+  role: UserRole;
+  isActive: boolean;
 }
 
 export interface Category {
@@ -288,6 +320,9 @@ export interface SupplierReturn {
   supplierName: string;
   items: SupplierReturnItem[];
   totalAmount: number;
+  debtReduction?: number; // Portion deducted from unpaid purchase remainingAmount
+  creditAdded?: number; // Excess credit_note added to supplier.creditBalance
+  refundAmount?: number; // Portion refunded via cash or bank_transfer
   settlementMethod: 'cash' | 'credit_note' | 'bank_transfer';
   userId: number;
   userName: string;
@@ -295,6 +330,7 @@ export interface SupplierReturn {
 }
 
 export type StockMovementType =
+  | 'opening_balance'
   | 'sale'
   | 'sale_return'
   | 'sale_cancel'
@@ -398,6 +434,27 @@ export interface LoginLog {
   details: string;
 }
 
+export interface CashSession {
+  id?: number;
+  status: 'open' | 'closed';
+  openedAt: string;
+  closedAt?: string;
+  openedByUserId: number;
+  openedByUserName: string;
+  closedByUserId?: number;
+  closedByUserName?: string;
+  openingBalance: number;
+  cashSales: number;
+  cashCollections: number;
+  cashRefunds: number;
+  cashExpenses: number;
+  cashSupplierPayments: number;
+  expectedCash: number;
+  countedCash?: number;
+  variance?: number; // countedCash - expectedCash
+  notes?: string;
+}
+
 export interface BackupRecord {
   id?: number;
   date: string;
@@ -406,7 +463,10 @@ export interface BackupRecord {
   encrypted: boolean;
   checksum: string;
   label: string;
-  payloadJson: string;
+  fileName?: string;
+  storageLocation?: 'directory' | 'download' | 'metadata_only' | 'legacy_idb';
+  folderName?: string;
+  payloadJson?: string; // Legacy only; new backups are saved externally and not stored in IndexedDB
 }
 
 export type InvoiceSurfaceBg = 'transparent' | 'light' | 'gold' | 'navy';
@@ -546,6 +606,7 @@ export interface AppSettings {
     autoBackupIntervalHours: number;
     lastAutoBackupAt: string | null;
     lastExternalExportAt?: string | null;
+    externalFolderName?: string | null;
     maxRetainedBackups: number;
     encryptBackupsDefault: boolean;
   };

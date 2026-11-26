@@ -15,6 +15,7 @@ import {
   LayoutDashboard,
   LayoutGrid,
   Lock,
+  LogOut,
   Package,
   Settings,
   ShoppingBag,
@@ -65,6 +66,9 @@ const SECTION_ICONS: Partial<Record<SectionId, React.ComponentType<{ className?:
 const AppShell: React.FC = () => {
   const {
     ready,
+    needsFirstRunSetup,
+    activeAccount,
+    signOutAccount,
     lang,
     setLang,
     activeSection,
@@ -97,6 +101,10 @@ const AppShell: React.FC = () => {
         {t(lang, 'جاري تحميل قاعدة البيانات المحلية...', 'Chargement de la base locale...')}
       </div>
     );
+  }
+
+  if (needsFirstRunSetup || isLocked || !currentUser || !activeAccount) {
+    return <LockScreen />;
   }
 
   const activeNavDef = NAV_SECTIONS.find((n) => n.id === activeSection);
@@ -181,7 +189,7 @@ const AppShell: React.FC = () => {
   const showMobileBottomNav = activeSection !== 'pos' && activeSection !== 'purchases';
 
   return (
-    <div className="min-h-dvh bg-slate-50 text-slate-900 flex flex-col">
+    <div key={activeAccount.accountId} className="min-h-dvh bg-slate-50 text-slate-900 flex flex-col">
       {/* Executive Navy & Gold Top Header Bar */}
       <header className="no-print sticky top-0 z-30 w-full bg-gradient-to-r from-[#041022] via-[#0B274D] to-[#041022] border-b-[3px] border-[#D9A738] shadow-md pt-safe">
         <div className="relative mx-auto flex h-14 sm:h-16 max-w-[1600px] items-center justify-between px-2.5 sm:px-5 lg:px-6 gap-2">
@@ -284,17 +292,27 @@ const AppShell: React.FC = () => {
               </button>
             </div>
 
-            {/* User & Lock */}
+            {/* User & Lock (switch staff within same account) */}
             <button
               type="button"
               onClick={() => setIsLocked(true)}
-              title={`${currentUser?.fullName ?? 'Admin'} — ${t(lang, 'قفل النظام', 'Verrouiller')}`}
+              title={`${currentUser?.fullName ?? 'Admin'} — ${t(lang, 'قفل الشاشة / تبديل المستخدم', 'Verrouiller / Changer d’utilisateur')}`}
               className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-white/20 transition-colors shrink-0"
             >
               <Lock className="h-3.5 w-3.5 text-[#F4BE42]" />
               <span className="hidden xl:inline max-w-[100px] truncate">
                 {currentUser?.fullName ?? 'Admin'}
               </span>
+            </button>
+
+            {/* Switch Independent Store Account */}
+            <button
+              type="button"
+              onClick={() => signOutAccount('login')}
+              title={`${activeAccount.storeName} (${activeAccount.licenseNumber}) — ${t(lang, 'تبديل حساب المتجر / تسجيل الخروج', 'Changer de compte magasin')}`}
+              className="inline-flex min-h-[34px] items-center justify-center rounded-lg border border-white/20 bg-white/10 px-2 py-1.5 text-xs font-semibold text-blue-100 hover:bg-red-500/20 hover:text-white transition-colors shrink-0"
+            >
+              <LogOut className="h-3.5 w-3.5" />
             </button>
           </div>
         </div>
@@ -409,6 +427,7 @@ const AppShell: React.FC = () => {
                     { id: 'suppliers', ar: 'دفعات الموردين', fr: 'Paiements fournisseurs' },
                     { id: 'expenses', ar: 'المصاريف التشغيلية', fr: 'Dépenses' },
                     { id: 'cashflow', ar: 'ملخص الصندوق', fr: 'Flux de caisse' },
+                    { id: 'sessions', ar: 'الورديات وجرد الصندوق', fr: 'Sessions & Caisse' },
                   ] as const,
                   paymentsTab,
                   (id) => setPaymentsTab(id as PaymentTabId)

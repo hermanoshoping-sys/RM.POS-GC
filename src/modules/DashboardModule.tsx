@@ -25,6 +25,7 @@ import { useApp } from '../context/AppContext';
 import { formatDateTime, formatMoney, getStatusLabel, t } from '../i18n/translations';
 import { getQuickPeriodRange, QUICK_PERIODS, QuickPeriodId, toLocalIsoDate } from '../utils/datePeriods';
 import { hasPermission } from '../utils/permissions';
+import { computeDashboardFinancials } from '../utils/dashboardMetrics';
 
 export type DashboardTabId = 'overview' | 'products' | 'invoices' | 'balances';
 
@@ -120,35 +121,38 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
 
     const allValidSales = saleInvoices.filter((s) => s.status !== 'cancelled');
     const allValidPurchases = purchaseInvoices.filter((p) => p.status !== 'cancelled');
-    const allValidExpenses = expenses.filter((e) => !e.isCancelled);
 
     const validSales = allValidSales.filter((s) => inRange(s.date));
     const validPurchases = allValidPurchases.filter((p) => inRange(p.date));
-    const validExpenses = allValidExpenses.filter((e) => inRange(e.date));
-    const validReturns = saleReturns.filter((r) => inRange(r.date));
 
-    const dailySales = allValidSales
-      .filter((s) => s.date.slice(0, 10) === todayStr)
-      .reduce((sum, s) => sum + s.total, 0);
-    const monthlySales = allValidSales
-      .filter((s) => s.date.slice(0, 7) === monthStr)
-      .reduce((sum, s) => sum + s.total, 0);
-    const yearlySales = allValidSales
-      .filter((s) => s.date.slice(0, 4) === yearStr)
-      .reduce((sum, s) => sum + s.total, 0);
-
-    const totalSales = validSales.reduce((sum, s) => sum + s.total, 0);
-    const totalPurchases = validPurchases.reduce((sum, p) => sum + p.total, 0);
-    const totalExpenses = validExpenses.reduce((sum, e) => sum + e.amount, 0);
-
-    const grossCogs = validSales.reduce(
-      (sum, inv) => sum + inv.items.reduce((is, it) => is + it.quantity * it.costPrice, 0),
-      0
+    const fin = computeDashboardFinancials(saleInvoices, saleReturns, expenses, inRange);
+    const dailyFin = computeDashboardFinancials(
+      saleInvoices,
+      saleReturns,
+      expenses,
+      (iso) => iso.slice(0, 10) === todayStr
     );
-    const totalReturnsAmount = validReturns.reduce((s, r) => s + r.totalAmount, 0);
-    const totalReturnsCost = validReturns.reduce((s, r) => s + r.totalCost, 0);
-    const netCogs = Math.max(0, grossCogs - totalReturnsCost);
-    const netProfit = totalSales - totalReturnsAmount - netCogs - totalExpenses;
+    const monthlyFin = computeDashboardFinancials(
+      saleInvoices,
+      saleReturns,
+      expenses,
+      (iso) => iso.slice(0, 7) === monthStr
+    );
+    const yearlyFin = computeDashboardFinancials(
+      saleInvoices,
+      saleReturns,
+      expenses,
+      (iso) => iso.slice(0, 4) === yearStr
+    );
+
+    const dailySales = dailyFin.netRevenue;
+    const monthlySales = monthlyFin.netRevenue;
+    const yearlySales = yearlyFin.netRevenue;
+
+    const totalSales = fin.netRevenue;
+    const totalPurchases = validPurchases.reduce((sum, p) => sum + p.total, 0);
+    const totalExpenses = fin.totalExpenses;
+    const netProfit = fin.netProfit;
 
     const totalCollected = validSales.reduce((s, inv) => s + inv.paidAmount, 0);
     const totalRemainingSales = validSales.reduce((s, inv) => s + inv.remainingAmount, 0);
@@ -222,26 +226,23 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
       .filter((p) => p.isActive && p.quantity <= p.minStock)
       .sort((a, b) => a.quantity - b.quantity);
 
-    // 7-day sales & profit chart
+    // 7-day sales & profit chart (excludes tax and returns of cancelled invoices)
     const dailyChart: { day: string; sales: number; profit: number }[] = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
       const key = toLocalIsoDate(d);
       const label = key.slice(5);
-      const daySalesList = allValidSales.filter((s) => s.date.slice(0, 10) === key);
-      const dayRev = daySalesList.reduce((s, x) => s + x.total, 0);
-      const dayCogs = daySalesList.reduce(
-        (s, x) => s + x.items.reduce((is, it) => is + it.quantity * it.costPrice, 0),
-        0
+      const dayFin = computeDashboardFinancials(
+        saleInvoices,
+        saleReturns,
+        expenses,
+        (iso) => iso.slice(0, 10) === key
       );
-      const dayExp = allValidExpenses
-        .filter((e) => e.date.slice(0, 10) === key)
-        .reduce((s, x) => s + x.amount, 0);
       dailyChart.push({
         day: label,
-        sales: Math.round(dayRev * 100) / 100,
-        profit: Math.round((dayRev - dayCogs - dayExp) * 100) / 100,
+        sales: dayFin.netRevenue,
+        profit: dayFin.netProfit,
       });
     }
 

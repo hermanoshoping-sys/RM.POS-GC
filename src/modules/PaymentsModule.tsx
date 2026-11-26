@@ -1,9 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { AlertTriangle, CalendarClock, Download, Plus, Printer, Receipt, RotateCcw, Search, Upload, X } from 'lucide-react';
+import { AlertTriangle, Calculator, CalendarClock, CheckCircle2, Download, Lock, PlayCircle, Plus, Printer, Receipt, RotateCcw, Search, Upload, X } from 'lucide-react';
 import { db } from '../db/database';
 import {
   addExpenseRecord,
+  CashSessionSummary,
+  computeCashSessionSummary,
   makeIdempotencyKey,
   recordCustomerPayment,
   recordSupplierPayment,
@@ -21,8 +23,9 @@ import {
 } from '../i18n/translations';
 import { exportRowsToExcel } from '../utils/export';
 import { getQuickPeriodRange, QUICK_PERIODS, QuickPeriodId, toLocalIsoDate } from '../utils/datePeriods';
+import { CashSessionModal } from '../components/CashSessionModal';
 
-export type PaymentTabId = 'customers' | 'suppliers' | 'expenses' | 'cashflow';
+export type PaymentTabId = 'customers' | 'suppliers' | 'expenses' | 'cashflow' | 'sessions';
 
 interface PaymentsModuleProps {
   activeTab?: PaymentTabId;
@@ -50,10 +53,44 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
   const saleInvoices = useLiveQuery(() => db.saleInvoices.toArray(), []) ?? [];
   const saleReturns = useLiveQuery(() => db.saleReturns.toArray(), []) ?? [];
   const purchaseInvoices = useLiveQuery(() => db.purchaseInvoices.toArray(), []) ?? [];
+  const supplierReturns = useLiveQuery(() => db.supplierReturns.toArray(), []) ?? [];
   const customerPayments = useLiveQuery(() => db.customerPayments.orderBy('refNumber').reverse().toArray(), []) ?? [];
   const supplierPayments = useLiveQuery(() => db.supplierPayments.orderBy('refNumber').reverse().toArray(), []) ?? [];
   const expenses = useLiveQuery(() => db.expenses.orderBy('date').reverse().toArray(), []) ?? [];
   const installments = useLiveQuery(() => db.installments.toArray(), []) ?? [];
+  const cashSessions = useLiveQuery(() => db.cashSessions.orderBy('openedAt').reverse().toArray(), []) ?? [];
+
+  const activeCashSession = useMemo(
+    () => cashSessions.find((s) => s.status === 'open'),
+    [cashSessions]
+  );
+  const [showShiftModal, setShowShiftModal] = useState(false);
+  const [liveSessionSummary, setLiveSessionSummary] = useState<CashSessionSummary | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!activeCashSession) {
+      setLiveSessionSummary(null);
+      return;
+    }
+    computeCashSessionSummary(
+      activeCashSession.openedAt,
+      new Date().toISOString(),
+      activeCashSession.openingBalance
+    ).then((res) => {
+      if (!cancelled) setLiveSessionSummary(res);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeCashSession,
+    saleInvoices.length,
+    customerPayments.length,
+    saleReturns.length,
+    expenses.length,
+    supplierPayments.length,
+  ]);
 
   // Shared Search & Period Filters (Inventory style)
   const [search, setSearch] = useState('');
@@ -402,7 +439,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
     const list: {
       id: string;
       date: string;
-      kind: 'customer_in' | 'supplier_out' | 'expense_out' | 'return_refund_out';
+      kind: 'customer_in' | 'supplier_out' | 'expense_out' | 'return_refund_out' | 'supplier_refund_in';
       ref: string;
       party: string;
       method: PaymentMethod;
@@ -487,6 +524,26 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
         });
       });
 
+    supplierReturns
+      .filter((r) => inRange(r.date))
+      .forEach((r) => {
+        if (r.settlementMethod === 'credit_note') return;
+        const refundIn = r.refundAmount ?? r.totalAmount;
+        if (refundIn <= 0.005) return;
+        list.push({
+          id: `sret-${r.id}`,
+          date: r.date,
+          kind: 'supplier_refund_in',
+          ref: r.returnNumber,
+          party: `${r.supplierName} (${t(lang, 'استرداد مرتجع مورد', 'Remboursement fournisseur')})`,
+          method: r.settlementMethod === 'bank_transfer' ? 'bank_transfer' : 'cash',
+          inAmount: refundIn,
+          outAmount: 0,
+          notes: `${r.purchaseInvoiceNumber} — ${r.reason || ''}`,
+          user: r.userName || '—',
+        });
+      });
+
     return list
       .filter(
         (r) =>
@@ -496,7 +553,19 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
           r.notes.toLowerCase().includes(q)
       )
       .sort((a, b) => b.date.localeCompare(a.date));
-  }, [customerPayments, supplierPayments, expenses, saleReturns, search, dateFrom, dateTo, lang]);
+  }, [customerPayments, supplierPayments, expenses, saleReturns, supplierReturns, search, dateFrom, dateTo, lang]);
+
+  const filteredCashSessions = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return cashSessions.filter((s) => {
+      if (!inRange(s.openedAt)) return false;
+      if (q) {
+        const hay = `#${s.id} ${s.openedByUserName} ${s.closedByUserName || ''} ${s.notes || ''}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [cashSessions, search, dateFrom, dateTo]);
 
   const totalCustPaid = useMemo(
     () => filteredCustPayments.reduce((s, p) => s + p.amount, 0),
@@ -616,6 +685,46 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
       return;
     }
 
+    if (activeTab === 'sessions') {
+      openPrint({
+        type: 'generic_report',
+        title: t(lang, 'تقرير الورديات وجرد الصندوق', 'Rapport des sessions de caisse'),
+        subtitle: `${periodLabel} · ${filteredCashSessions.length} ${t(lang, 'وردية', 'sessions')}`,
+        summaryItems: [
+          {
+            label: t(lang, 'إجمالي الفارق (المغلقة)', 'Écart total (clôturées)'),
+            value: formatMoney(
+              filteredCashSessions.reduce((s, x) => s + (x.variance ?? 0), 0),
+              cur
+            ),
+          },
+        ],
+        columns: [
+          '#',
+          t(lang, 'تاريخ الفتح', 'Ouverture'),
+          t(lang, 'تاريخ الإغلاق', 'Clôture'),
+          t(lang, 'المسؤول', 'Caissier'),
+          t(lang, 'الافتتاح', 'Fond'),
+          t(lang, 'النقد المتوقع', 'Attendu'),
+          t(lang, 'النقد المعدود', 'Compté'),
+          t(lang, 'الفارق', 'Écart'),
+          t(lang, 'الحالة', 'Statut'),
+        ],
+        rows: filteredCashSessions.map((s) => [
+          `#${s.id}`,
+          formatDateTime(s.openedAt, lang),
+          s.closedAt ? formatDateTime(s.closedAt, lang) : '—',
+          s.openedByUserName,
+          s.openingBalance.toFixed(2),
+          s.expectedCash.toFixed(2),
+          s.countedCash !== undefined ? s.countedCash.toFixed(2) : '—',
+          s.variance !== undefined ? `${s.variance >= 0 ? '+' : ''}${s.variance.toFixed(2)}` : '—',
+          s.status === 'open' ? t(lang, 'مفتوحة', 'Ouverte') : t(lang, 'مغلقة', 'Clôturée'),
+        ]),
+      });
+      return;
+    }
+
     openPrint({
       type: 'generic_report',
       title: t(lang, 'ملخص حركات الصندوق والدفعات', 'Flux de caisse & paiements'),
@@ -639,11 +748,13 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
         r.ref,
         r.kind === 'customer_in'
           ? t(lang, 'دفعة زبون', 'Client')
-          : r.kind === 'supplier_out'
-            ? t(lang, 'دفعة مورد', 'Fournisseur')
-            : r.kind === 'return_refund_out'
-              ? t(lang, 'استرداد مرتجع', 'Remboursement retour')
-              : t(lang, 'مصروف', 'Dépense'),
+          : r.kind === 'supplier_refund_in'
+            ? t(lang, 'استرداد مورد', 'Remb. fournisseur')
+            : r.kind === 'supplier_out'
+              ? t(lang, 'دفعة مورد', 'Fournisseur')
+              : r.kind === 'return_refund_out'
+                ? t(lang, 'استرداد مرتجع', 'Remboursement retour')
+                : t(lang, 'مصروف', 'Dépense'),
         r.party,
         getPaymentMethodLabel(r.method, lang),
         r.inAmount ? r.inAmount.toFixed(2) : '—',
@@ -709,6 +820,31 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
         'Expenses',
         'expenses.xlsx'
       );
+    } else if (activeTab === 'sessions') {
+      if (!filteredCashSessions.length) {
+        notify(t(lang, 'لا توجد بيانات للتصدير', 'Aucune donnée à exporter'), 'warning');
+        return;
+      }
+      exportRowsToExcel(
+        filteredCashSessions.map((s) => ({
+          '#': `#${s.id}`,
+          [t(lang, 'تاريخ الفتح', 'Ouverture')]: formatDateTime(s.openedAt, lang),
+          [t(lang, 'تاريخ الإغلاق', 'Clôture')]: s.closedAt ? formatDateTime(s.closedAt, lang) : '',
+          [t(lang, 'المسؤول', 'Caissier')]: s.openedByUserName,
+          [t(lang, 'الافتتاح', 'Fond')]: s.openingBalance,
+          [t(lang, 'مبيعات نقدية', 'Ventes espèces')]: s.cashSales,
+          [t(lang, 'تحصيلات نقدية', 'Encaissements')]: s.cashCollections,
+          [t(lang, 'استردادات نقدية', 'Remboursements')]: s.cashRefunds,
+          [t(lang, 'مصاريف نقدية', 'Dépenses')]: s.cashExpenses,
+          [t(lang, 'دفعات موردين', 'Fournisseurs')]: s.cashSupplierPayments,
+          [t(lang, 'المتوقع', 'Attendu')]: s.expectedCash,
+          [t(lang, 'المعدود', 'Compté')]: s.countedCash ?? '',
+          [t(lang, 'الفارق', 'Écart')]: s.variance ?? '',
+          [t(lang, 'الحالة', 'Statut')]: s.status,
+        })),
+        'CashSessions',
+        'cash_sessions.xlsx'
+      );
     } else {
       if (!cashflowRows.length) {
         notify(t(lang, 'لا توجد بيانات للتصدير', 'Aucune donnée à exporter'), 'warning');
@@ -753,6 +889,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
               { id: 'suppliers', ar: 'دفعات الموردين', fr: 'Paiements fournisseurs' },
               { id: 'expenses', ar: 'المصاريف التشغيلية', fr: 'Dépenses' },
               { id: 'cashflow', ar: 'ملخص الصندوق', fr: 'Flux de caisse' },
+              { id: 'sessions', ar: 'الورديات وجرد الصندوق', fr: 'Sessions & caisse' },
             ] as const
           ).map((tab) => (
             <button
@@ -947,6 +1084,23 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
               {t(lang, 'مصروف', 'Dépense')}
             </button>
           </div>
+        )}
+
+        {activeTab === 'sessions' && (
+          <button
+            type="button"
+            onClick={() => setShowShiftModal(true)}
+            className={`inline-flex items-center gap-1.5 rounded-lg border-[1.5px] px-3.5 py-2 text-xs font-extrabold whitespace-nowrap shrink-0 ${
+              activeCashSession
+                ? 'border-[#0B274D] bg-[#0B274D] text-[#FDE68A] hover:bg-[#133A6E]'
+                : 'border-emerald-900 bg-emerald-700 text-white hover:bg-emerald-800'
+            }`}
+          >
+            {activeCashSession ? <Lock className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}
+            {activeCashSession
+              ? t(lang, `جرد وإغلاق الوردية #${activeCashSession.id}`, `Clôturer session #${activeCashSession.id}`)
+              : t(lang, 'فتح وردية جديدة', 'Ouvrir une session')}
+          </button>
         )}
       </div>
 
@@ -1346,7 +1500,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                     </td>
                     <td
                       className={`border border-slate-800/80 px-2 py-1 text-center font-bold ${
-                        r.kind === 'customer_in'
+                        r.kind === 'customer_in' || r.kind === 'supplier_refund_in'
                           ? 'bg-emerald-50 text-emerald-800'
                           : r.kind === 'supplier_out'
                             ? 'bg-sky-50 text-sky-900'
@@ -1357,11 +1511,13 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                     >
                       {r.kind === 'customer_in'
                         ? t(lang, 'تحصيل زبون', 'Encaissement')
-                        : r.kind === 'supplier_out'
-                          ? t(lang, 'أداء مورد', 'Fournisseur')
-                          : r.kind === 'return_refund_out'
-                            ? t(lang, 'استرداد مرتجع', 'Remboursement retour')
-                            : t(lang, 'مصروف', 'Dépense')}
+                        : r.kind === 'supplier_refund_in'
+                          ? t(lang, 'استرداد مورد', 'Remb. fournisseur')
+                          : r.kind === 'supplier_out'
+                            ? t(lang, 'أداء مورد', 'Fournisseur')
+                            : r.kind === 'return_refund_out'
+                              ? t(lang, 'استرداد مرتجع', 'Remboursement retour')
+                              : t(lang, 'مصروف', 'Dépense')}
                     </td>
                     <td className="border border-slate-800/80 px-2.5 py-1 font-bold text-slate-950">
                       {r.party}
@@ -1401,6 +1557,187 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                 </tr>
               </tfoot>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 5: Cash Sessions & Drawer Reconciliation */}
+      {activeTab === 'sessions' && (
+        <div className="space-y-2.5">
+          {/* Active Shift Live Status Panel */}
+          <div className="rounded-lg border-[1.5px] border-slate-900 bg-white p-3.5 shadow-xs">
+            {activeCashSession ? (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
+                    <Calculator className="h-4 w-4 text-[#0B274D]" />
+                    <span className="text-sm font-black text-slate-950">
+                      {t(lang, `الوردية المفتوحة حالياً #${activeCashSession.id}`, `Session active #${activeCashSession.id}`)}
+                    </span>
+                    <span className="text-xs text-slate-600">
+                      ({activeCashSession.openedByUserName} · {formatDateTime(activeCashSession.openedAt, lang)})
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowShiftModal(true)}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B274D] px-3.5 py-1.5 text-xs font-extrabold text-[#FDE68A] hover:bg-[#133A6E]"
+                  >
+                    <Lock className="h-3.5 w-3.5" />
+                    {t(lang, 'جرد وإغلاق الوردية', 'Compter & Clôturer')}
+                  </button>
+                </div>
+
+                {liveSessionSummary && (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 text-xs font-mono tabular-nums">
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
+                      <div className="font-sans text-[10px] font-bold text-slate-600">{t(lang, 'رصيد الافتتاح', 'Ouverture')}</div>
+                      <div className="font-extrabold text-slate-900">{formatMoney(liveSessionSummary.openingBalance, cur)}</div>
+                    </div>
+                    <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 px-2.5 py-2">
+                      <div className="font-sans text-[10px] font-bold text-emerald-800">+ {t(lang, 'مبيعات نقدية', 'Ventes')}</div>
+                      <div className="font-extrabold text-emerald-700">+{formatMoney(liveSessionSummary.cashSales, cur)}</div>
+                    </div>
+                    <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 px-2.5 py-2">
+                      <div className="font-sans text-[10px] font-bold text-emerald-800">+ {t(lang, 'تحصيلات', 'Encaissements')}</div>
+                      <div className="font-extrabold text-emerald-700">+{formatMoney(liveSessionSummary.cashCollections, cur)}</div>
+                    </div>
+                    <div className="rounded-lg border border-red-200 bg-red-50/70 px-2.5 py-2">
+                      <div className="font-sans text-[10px] font-bold text-red-800">− {t(lang, 'استردادات', 'Rembours.')}</div>
+                      <div className="font-extrabold text-red-700">-{formatMoney(liveSessionSummary.cashRefunds, cur)}</div>
+                    </div>
+                    <div className="rounded-lg border border-red-200 bg-red-50/70 px-2.5 py-2">
+                      <div className="font-sans text-[10px] font-bold text-red-800">− {t(lang, 'مصاريف', 'Dépenses')}</div>
+                      <div className="font-extrabold text-red-700">-{formatMoney(liveSessionSummary.cashExpenses, cur)}</div>
+                    </div>
+                    <div className="rounded-lg border border-red-200 bg-red-50/70 px-2.5 py-2">
+                      <div className="font-sans text-[10px] font-bold text-red-800">− {t(lang, 'موردون', 'Fourniss.')}</div>
+                      <div className="font-extrabold text-red-700">-{formatMoney(liveSessionSummary.cashSupplierPayments, cur)}</div>
+                    </div>
+                    <div className="rounded-lg border-2 border-[#0B274D] bg-[#FEF3C7] px-2.5 py-2">
+                      <div className="font-sans text-[10px] font-black text-[#0B274D]">{t(lang, 'النقد المتوقع', 'Attendu')}</div>
+                      <div className="font-black text-[#0B274D]">{formatMoney(liveSessionSummary.expectedCash, cur)}</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 text-slate-700">
+                  <Calculator className="h-4 w-4 text-slate-500" />
+                  <span className="font-bold">
+                    {t(
+                      lang,
+                      'لا توجد وردية صندوق مفتوحة حالياً — افتح وردية برصيد الافتتاح لتتبع النقد المتوقع والفارق.',
+                      'Aucune session de caisse ouverte — ouvrez une session pour suivre le solde espèces attendu.'
+                    )}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowShiftModal(true)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 px-3.5 py-1.5 text-xs font-extrabold text-white hover:bg-emerald-800"
+                >
+                  <PlayCircle className="h-3.5 w-3.5" />
+                  {t(lang, 'فتح وردية الآن', 'Ouvrir maintenant')}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Sessions History Spreadsheet */}
+          <div className="border-[1.5px] border-slate-900 bg-white overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr className="bg-[#FCE08B] text-slate-950">
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold">#</th>
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold whitespace-nowrap">{t(lang, 'الفتح', 'Ouverture')}</th>
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold whitespace-nowrap">{t(lang, 'الإغلاق', 'Clôture')}</th>
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold">{t(lang, 'المستخدم', 'Utilisateur')}</th>
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold">{t(lang, 'الافتتاح', 'Fond')}</th>
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold">{t(lang, 'مبيعات', 'Ventes')}</th>
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold">{t(lang, 'تحصيلات', 'Encaiss.')}</th>
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold">{t(lang, 'خوارج نقدية', 'Sorties')}</th>
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold">{t(lang, 'المتوقع', 'Attendu')}</th>
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold">{t(lang, 'المعدود', 'Compté')}</th>
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold">{t(lang, 'الفارق', 'Écart')}</th>
+                    <th className="border border-slate-900 px-2 py-2 text-center font-extrabold">{t(lang, 'الحالة', 'Statut')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredCashSessions.map((s) => {
+                    const isOpen = s.status === 'open';
+                    const expected = isOpen && liveSessionSummary ? liveSessionSummary.expectedCash : s.expectedCash;
+                    const cashSalesVal = isOpen && liveSessionSummary ? liveSessionSummary.cashSales : s.cashSales;
+                    const cashCollVal = isOpen && liveSessionSummary ? liveSessionSummary.cashCollections : s.cashCollections;
+                    const outflows = isOpen && liveSessionSummary
+                      ? liveSessionSummary.cashRefunds + liveSessionSummary.cashExpenses + liveSessionSummary.cashSupplierPayments
+                      : s.cashRefunds + s.cashExpenses + s.cashSupplierPayments;
+                    return (
+                      <tr key={s.id} className="h-[31px] hover:bg-amber-50/50 transition-colors">
+                        <td className="border border-slate-800/80 px-2 py-1 text-center font-mono font-bold">#{s.id}</td>
+                        <td className="border border-slate-800/80 px-2 py-1 text-center font-mono text-[11px] whitespace-nowrap">
+                          {formatDateTime(s.openedAt, lang)}
+                        </td>
+                        <td className="border border-slate-800/80 px-2 py-1 text-center font-mono text-[11px] whitespace-nowrap">
+                          {s.closedAt ? formatDateTime(s.closedAt, lang) : '—'}
+                        </td>
+                        <td className="border border-slate-800/80 px-2 py-1 text-center font-semibold text-slate-900">
+                          {s.openedByUserName}
+                        </td>
+                        <td className="border border-slate-800/80 px-2 py-1 text-center font-mono tabular-nums">
+                          {s.openingBalance.toFixed(2)}
+                        </td>
+                        <td className="border border-slate-800/80 px-2 py-1 text-center font-mono tabular-nums text-emerald-700 font-bold">
+                          +{cashSalesVal.toFixed(2)}
+                        </td>
+                        <td className="border border-slate-800/80 px-2 py-1 text-center font-mono tabular-nums text-emerald-700">
+                          +{cashCollVal.toFixed(2)}
+                        </td>
+                        <td className="border border-slate-800/80 px-2 py-1 text-center font-mono tabular-nums text-red-700">
+                          -{outflows.toFixed(2)}
+                        </td>
+                        <td className="border border-slate-800/80 px-2 py-1 text-center font-mono font-extrabold tabular-nums text-[#0B274D]">
+                          {expected.toFixed(2)}
+                        </td>
+                        <td className="border border-slate-800/80 px-2 py-1 text-center font-mono font-bold tabular-nums">
+                          {s.countedCash !== undefined ? s.countedCash.toFixed(2) : '—'}
+                        </td>
+                        <td
+                          className={`border border-slate-800/80 px-2 py-1 text-center font-mono font-extrabold tabular-nums ${
+                            s.variance === undefined
+                              ? 'text-slate-400'
+                              : Math.abs(s.variance) < 0.01
+                                ? 'text-emerald-700 bg-emerald-50/50'
+                                : s.variance > 0
+                                  ? 'text-blue-700 bg-blue-50/50'
+                                  : 'text-red-700 bg-red-50/50'
+                          }`}
+                        >
+                          {s.variance !== undefined ? `${s.variance >= 0 ? '+' : ''}${s.variance.toFixed(2)}` : '—'}
+                        </td>
+                        <td className="border border-slate-800/80 px-2 py-1 text-center">
+                          {isOpen ? (
+                            <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800">
+                              <PlayCircle className="h-3 w-3" />
+                              {t(lang, 'مفتوحة', 'Ouverte')}
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-700">
+                              <CheckCircle2 className="h-3 w-3" />
+                              {t(lang, 'مغلقة', 'Clôturée')}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {renderBlankRows(filteredCashSessions.length, 12)}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
@@ -1993,6 +2330,13 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
           </form>
         </div>
       )}
+
+      {/* Cash Session Modal */}
+      <CashSessionModal
+        open={showShiftModal}
+        activeSession={activeCashSession}
+        onClose={() => setShowShiftModal(false)}
+      />
     </div>
   );
 };

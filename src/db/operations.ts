@@ -2,6 +2,7 @@ import { db, createDefaultSettings } from './database';
 import {
   AppSettings,
   AppUser,
+  CashSession,
   CustomerPayment,
   Expense,
   Installment,
@@ -21,8 +22,9 @@ import {
   SupplierReturnItem,
 } from '../types';
 import { computeSha256, decryptBackupPayload, encryptBackupPayload } from '../utils/crypto';
-import { assertPermission } from '../utils/permissions';
+import { assertPermission, getMaxDiscountPercent } from '../utils/permissions';
 import { calculateSaleReturnBreakdown, toSaleReturnItems } from '../utils/returns';
+import { saveBackupExternally } from '../utils/backupStorage';
 
 export function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -131,8 +133,11 @@ export async function createSaleInvoice(
       const settings = (await db.settings.get(1)) ?? createDefaultSettings();
       const allowNeg = settings.posConfig.allowNegativeStock;
 
-      // Validate stock & snapshot COGS
+      // Validate stock, price override permissions & snapshot COGS
       const enrichedItems: SaleInvoiceItem[] = [];
+      let grossBeforeDiscounts = 0;
+      let lineDiscountsTotal = 0;
+
       for (const item of input.items) {
         const product = await db.products.get(item.productId);
         if (!product) {
@@ -143,10 +148,38 @@ export async function createSaleInvoice(
             `الكمية غير متوفرة للمنتج "${product.name}" (المتوفر: ${product.quantity})`
           );
         }
+
+        const cleanUnitPrice = round2(Math.max(0, item.unitPrice));
+        const cleanLineDiscount = round2(Math.max(0, item.discount || 0));
+
+        // Enforce price override permission server/service-side
+        if (!user.permissions?.canOverridePrice) {
+          const allowedPrices = [
+            product.salePrice,
+            product.wholesalePrice,
+            product.secondSalePrice,
+          ].filter((p) => typeof p === 'number' && p >= 0);
+          const matchesCatalogPrice = allowedPrices.some(
+            (p) => Math.abs(p - cleanUnitPrice) <= 0.005
+          );
+          if (!matchesCatalogPrice) {
+            throw new Error(
+              `ليس لديك صلاحية تعديل سعر البيع للمنتج "${product.name}" / Modification du prix non autorisée`
+            );
+          }
+        }
+
+        const lineGross = round2(item.quantity * cleanUnitPrice);
+        const cappedLineDiscount = Math.min(lineGross, cleanLineDiscount);
+        grossBeforeDiscounts = round2(grossBeforeDiscounts + lineGross);
+        lineDiscountsTotal = round2(lineDiscountsTotal + cappedLineDiscount);
+
         enrichedItems.push({
           ...item,
+          unitPrice: cleanUnitPrice,
+          discount: cappedLineDiscount,
           costPrice: product.purchasePrice,
-          total: round2(item.quantity * item.unitPrice - item.discount),
+          total: round2(lineGross - cappedLineDiscount),
           returnedQty: 0,
         });
       }
@@ -156,6 +189,27 @@ export async function createSaleInvoice(
         input.discountType === 'percent'
           ? round2((subtotal * Math.min(100, Math.max(0, input.discountValue))) / 100)
           : round2(Math.min(subtotal, Math.max(0, input.discountValue)));
+
+      // Enforce discount permission & maximum discount ceiling (line + invoice discounts combined)
+      const totalDiscountApplied = round2(lineDiscountsTotal + discountAmount);
+      if (totalDiscountApplied > 0.005) {
+        if (!user.permissions?.canGiveDiscount) {
+          throw new Error(
+            'ليس لديك صلاحية منح الخصومات / Vous n’avez pas l’autorisation d’accorder des remises'
+          );
+        }
+        const maxPct = getMaxDiscountPercent(user);
+        const effectivePct =
+          grossBeforeDiscounts > 0
+            ? (totalDiscountApplied / grossBeforeDiscounts) * 100
+            : 100;
+        if (effectivePct > maxPct + 0.01) {
+          throw new Error(
+            `نسبة الخصم (${effectivePct.toFixed(1)}%) تتجاوز السقف المسموح لك (${maxPct}%) / Remise supérieure au plafond autorisé (${maxPct}%)`
+          );
+        }
+      }
+
       const taxable = Math.max(0, round2(subtotal - discountAmount));
       const taxAmount = round2((taxable * Math.max(0, input.taxRate)) / 100);
       const total = round2(taxable + taxAmount);
@@ -467,72 +521,55 @@ export async function cancelSaleInvoice(
   );
 }
 
-export async function restoreCancelledSaleInvoice(
-  invoiceId: number,
-  auditLogId: number | undefined,
-  user: AppUser
-): Promise<void> {
-  assertPermission(user, 'canRestoreCancelled', 'ليس لديك صلاحية استعادة الفواتير الملغاة');
-  await db.transaction(
-    'rw',
-    [db.saleInvoices, db.products, db.stockMovements, db.auditLogs],
-    async () => {
-      const inv = await db.saleInvoices.get(invoiceId);
-      if (!inv || inv.status !== 'cancelled') {
-        throw new Error('الفاتورة غير ملغاة أو غير موجودة');
-      }
-      const nowIso = new Date().toISOString();
-      const restoredStatus =
-        inv.remainingAmount <= 0.005 ? 'paid' : inv.paidAmount > 0 ? 'partial' : 'unpaid';
+// Clone a cancelled invoice as a brand-new invoice instead of mutating deleted installments/payments
+export async function cloneSaleInvoiceAsNew(
+  sourceInvoiceId: number,
+  user: AppUser,
+  auditLogId?: number
+): Promise<SaleInvoice> {
+  assertPermission(user, 'canRestoreCancelled', 'ليس لديك صلاحية نسخ الفواتير الملغاة');
+  assertPermission(user, 'canSell', 'ليس لديك صلاحية إنشاء فواتير البيع');
 
-      await db.saleInvoices.update(invoiceId, {
-        status: restoredStatus,
-        cancelReason: undefined,
-        cancelledAt: undefined,
-        cancelledBy: undefined,
-      });
+  const source = await db.saleInvoices.get(sourceInvoiceId);
+  if (!source || source.status !== 'cancelled') {
+    throw new Error('الفاتورة غير ملغاة أو غير موجودة');
+  }
 
-      for (const item of inv.items) {
-        const netToDeduct = round2(item.quantity - (item.returnedQty ?? 0));
-        if (netToDeduct <= 0) continue;
-        const prod = await db.products.get(item.productId);
-        if (prod) {
-          const beforeQty = prod.quantity;
-          const afterQty = round2(beforeQty - netToDeduct);
-          await db.products.update(prod.id!, { quantity: afterQty, updatedAt: nowIso });
-          await db.stockMovements.add({
-            date: nowIso,
-            productId: prod.id!,
-            productName: prod.name,
-            barcode: prod.barcode,
-            type: 'sale',
-            quantityDelta: -netToDeduct,
-            beforeQty,
-            afterQty,
-            unitCost: item.costPrice,
-            unitPrice: item.unitPrice,
-            referenceNumber: inv.invoiceNumber,
-            userId: user.id ?? 1,
-            userName: user.fullName,
-            note: `استعادة فاتورة ملغاة ${inv.invoiceNumber}`,
-          });
-        }
-      }
+  const cloneInput: CreateSaleInput = {
+    customerId: source.customerId,
+    customerName: source.customerName,
+    items: source.items.map((it) => ({
+      ...it,
+      returnedQty: 0,
+    })),
+    discountType: source.discountType,
+    discountValue: source.discountValue,
+    taxRate: source.taxRate,
+    paymentSplits: source.paymentSplits.map((sp) => ({ ...sp })),
+    tenderedAmount: source.paidAmount,
+    isCredit: source.isCredit,
+    dueDate: source.dueDate,
+    installmentCount: source.installmentCount,
+    installmentFrequency: source.installmentFrequency,
+    applyCreditBalance: Boolean(source.creditApplied && source.creditApplied > 0),
+    notes: `${source.notes ? `${source.notes} — ` : ''}نسخة جديدة من الفاتورة الملغاة ${source.invoiceNumber}`,
+    idempotencyKey: makeIdempotencyKey('clone-sale'),
+  };
 
-      if (auditLogId) {
-        await db.auditLogs.update(auditLogId, { restored: true });
-      }
-      await db.auditLogs.add({
-        date: nowIso,
-        userId: user.id ?? 1,
-        userName: user.fullName,
-        action: 'SALE_RESTORED',
-        entityType: 'saleInvoice',
-        entityId: String(invoiceId),
-        details: `استعادة فاتورة المبيعات الملغاة ${inv.invoiceNumber}`,
-      });
-    }
+  const cloned = await createSaleInvoice(cloneInput, user);
+
+  if (auditLogId) {
+    await db.auditLogs.update(auditLogId, { restored: true });
+  }
+  await logAudit(
+    user,
+    'SALE_CLONED',
+    'saleInvoice',
+    cloned.id ?? '',
+    `نسخ الفاتورة الملغاة ${source.invoiceNumber} كفاتورة جديدة ${cloned.invoiceNumber}`
   );
+
+  return cloned;
 }
 
 export async function updateSaleInvoiceControlled(
@@ -543,11 +580,47 @@ export async function updateSaleInvoiceControlled(
   assertPermission(user, 'canEditInvoice', 'ليس لديك صلاحية تعديل الفواتير');
   await db.transaction(
     'rw',
-    [db.saleInvoices, db.products, db.stockMovements, db.auditLogs],
+    [
+      db.saleInvoices,
+      db.products,
+      db.stockMovements,
+      db.installments,
+      db.customerPayments,
+      db.settings,
+      db.auditLogs,
+    ],
     async () => {
       const inv = await db.saleInvoices.get(invoiceId);
       if (!inv) throw new Error('الفاتورة غير موجودة');
       if (inv.status === 'cancelled') throw new Error('لا يمكن تعديل فاتورة ملغاة');
+
+      // Block edits if the invoice already has payments or installments attached
+      if (inv.paidAmount > 0.005) {
+        throw new Error(
+          'لا يمكن تعديل فاتورة مسجل عليها مدفوعات — يرجى إلغاؤها ونسخها كفاتورة جديدة'
+        );
+      }
+      const linkedInstallmentsCount = await db.installments
+        .where('saleInvoiceId')
+        .equals(invoiceId)
+        .count();
+      if (linkedInstallmentsCount > 0) {
+        throw new Error(
+          'لا يمكن تعديل فاتورة مرتبطة بجدول أقساط — يرجى إلغاؤها ونسخها كفاتورة جديدة'
+        );
+      }
+      const allPayments = await db.customerPayments.toArray();
+      const hasActivePayment = allPayments.some(
+        (p) => !p.isCancelled && p.invoiceIds.includes(invoiceId)
+      );
+      if (hasActivePayment) {
+        throw new Error(
+          'لا يمكن تعديل فاتورة مرتبطة بدفعات زبون — يرجى إلغاؤها ونسخها كفاتورة جديدة'
+        );
+      }
+
+      const settings = (await db.settings.get(1)) ?? createDefaultSettings();
+      const allowNeg = settings.posConfig.allowNegativeStock;
 
       const nowIso = new Date().toISOString();
       // Compute stock delta per product
@@ -559,6 +632,23 @@ export async function updateSaleInvoiceControlled(
       );
 
       const allProductIds = new Set([...oldMap.keys(), ...newMap.keys()]);
+
+      // First pass: validate stock availability before mutating anything
+      for (const pid of allProductIds) {
+        const deltaSold = round2((newMap.get(pid) ?? 0) - (oldMap.get(pid) ?? 0));
+        if (deltaSold <= 0.0001) continue;
+        const prod = await db.products.get(pid);
+        if (!prod) {
+          throw new Error(`المنتج غير موجود (#${pid})`);
+        }
+        if (!allowNeg && prod.quantity < deltaSold) {
+          throw new Error(
+            `الكمية غير متوفرة للمنتج "${prod.name}" (المتوفر: ${prod.quantity}، المطلوب الإضافي: ${deltaSold})`
+          );
+        }
+      }
+
+      // Second pass: apply stock adjustments and movements
       for (const pid of allProductIds) {
         const deltaSold = round2((newMap.get(pid) ?? 0) - (oldMap.get(pid) ?? 0));
         if (Math.abs(deltaSold) < 0.0001) continue;
@@ -981,7 +1071,7 @@ export async function cancelPurchaseInvoice(
   if (!reason.trim()) throw new Error('أدخل سبب الإلغاء');
   await db.transaction(
     'rw',
-    [db.purchaseInvoices, db.products, db.stockMovements, db.auditLogs],
+    [db.purchaseInvoices, db.products, db.stockMovements, db.supplierPayments, db.suppliers, db.auditLogs],
     async () => {
       const inv = await db.purchaseInvoices.get(purchaseId);
       if (!inv) throw new Error('فاتورة الشراء غير موجودة');
@@ -1022,6 +1112,30 @@ export async function cancelPurchaseInvoice(
         }
       }
 
+      // Cancel sole-invoice supplier payments linked to this purchase
+      const supPayments = await db.supplierPayments
+        .where('supplierId')
+        .equals(inv.supplierId)
+        .toArray();
+      let cancelledPaidTotal = 0;
+      for (const p of supPayments) {
+        if (!p.isCancelled && p.purchaseIds.length === 1 && p.purchaseIds[0] === purchaseId) {
+          await db.supplierPayments.update(p.id!, { isCancelled: true });
+          cancelledPaidTotal = round2(cancelledPaidTotal + p.amount);
+        }
+      }
+
+      // Any remaining paid portion (e.g. from multi-invoice batch payment) becomes supplier creditBalance
+      const unreversedPaid = round2(Math.max(0, inv.paidAmount - cancelledPaidTotal));
+      if (unreversedPaid > 0.005) {
+        const sup = await db.suppliers.get(inv.supplierId);
+        if (sup) {
+          await db.suppliers.update(inv.supplierId, {
+            creditBalance: round2((sup.creditBalance ?? 0) + unreversedPaid),
+          });
+        }
+      }
+
       await db.auditLogs.add({
         date: nowIso,
         userId: user.id ?? 1,
@@ -1029,7 +1143,7 @@ export async function cancelPurchaseInvoice(
         action: 'PURCHASE_CANCELLED',
         entityType: 'purchaseInvoice',
         entityId: String(purchaseId),
-        details: `إلغاء فاتورة شراء ${inv.invoiceNumber} — السبب: ${reason}`,
+        details: `إلغاء فاتورة شراء ${inv.invoiceNumber} — السبب: ${reason}${cancelledPaidTotal > 0 ? ` (إلغاء دفعات: ${cancelledPaidTotal.toFixed(2)})` : ''}${unreversedPaid > 0 ? ` (رصيد للمورد: ${unreversedPaid.toFixed(2)})` : ''}`,
         canRestore: false,
       });
     }
@@ -1048,7 +1162,7 @@ export async function createSupplierReturn(
 
   return db.transaction(
     'rw',
-    [db.purchaseInvoices, db.supplierReturns, db.products, db.stockMovements, db.settings, db.auditLogs],
+    [db.purchaseInvoices, db.supplierReturns, db.suppliers, db.products, db.stockMovements, db.settings, db.auditLogs],
     async () => {
       const purchase = await db.purchaseInvoices.get(purchaseInvoiceId);
       if (!purchase) throw new Error('فاتورة الشراء غير موجودة');
@@ -1095,16 +1209,43 @@ export async function createSupplierReturn(
         }
       }
 
-      // If settled as credit_note, reduce supplier's remaining payable on the purchase invoice
+      let debtReduction = 0;
+      let creditAdded = 0;
+      let refundAmount = 0;
       let newRemaining = purchase.remainingAmount;
+      let newPaid = purchase.paidAmount;
+
       if (settlementMethod === 'credit_note') {
-        newRemaining = round2(Math.max(0, purchase.remainingAmount - totalAmount));
+        debtReduction = round2(Math.min(purchase.remainingAmount, totalAmount));
+        newRemaining = round2(Math.max(0, purchase.remainingAmount - debtReduction));
+        creditAdded = round2(Math.max(0, totalAmount - debtReduction));
+
+        if (creditAdded > 0.005) {
+          const sup = await db.suppliers.get(purchase.supplierId);
+          if (sup) {
+            await db.suppliers.update(purchase.supplierId, {
+              creditBalance: round2((sup.creditBalance ?? 0) + creditAdded),
+            });
+          }
+        }
+      } else {
+        // cash or bank_transfer refund from supplier
+        refundAmount = totalAmount;
+        const paidCut = round2(Math.min(purchase.paidAmount, totalAmount));
+        newPaid = round2(Math.max(0, purchase.paidAmount - paidCut));
+        const extraDebtCut = round2(Math.max(0, totalAmount - paidCut));
+        if (extraDebtCut > 0.005) {
+          debtReduction = round2(Math.min(purchase.remainingAmount, extraDebtCut));
+          newRemaining = round2(Math.max(0, purchase.remainingAmount - debtReduction));
+        }
       }
+
       const newStatus =
-        newRemaining <= 0.005 ? 'paid' : purchase.paidAmount > 0 ? 'partial' : 'unpaid';
+        newRemaining <= 0.005 ? 'paid' : newPaid > 0 ? 'partial' : 'unpaid';
 
       await db.purchaseInvoices.update(purchaseInvoiceId, {
         items: updatedItems,
+        paidAmount: newPaid,
         remainingAmount: newRemaining,
         status: newStatus,
       });
@@ -1118,6 +1259,9 @@ export async function createSupplierReturn(
         supplierName: purchase.supplierName,
         items,
         totalAmount,
+        debtReduction: debtReduction > 0 ? debtReduction : undefined,
+        creditAdded: creditAdded > 0 ? creditAdded : undefined,
+        refundAmount: refundAmount > 0 ? refundAmount : undefined,
         settlementMethod,
         userId: user.id ?? 1,
         userName: user.fullName,
@@ -1141,7 +1285,7 @@ export async function createSupplierReturn(
         action: 'SUPPLIER_RETURN',
         entityType: 'supplierReturn',
         entityId: String(id),
-        details: `إرجاع للمورد ${purchase.supplierName} (${returnNumber}) بمبلغ ${totalAmount.toFixed(2)}`,
+        details: `إرجاع للمورد ${purchase.supplierName} (${returnNumber}) بمبلغ ${totalAmount.toFixed(2)}${creditAdded > 0 ? ` (رصيد مضاف: ${creditAdded.toFixed(2)})` : ''}${refundAmount > 0 ? ` (استرداد ${settlementMethod === 'cash' ? 'نقدي' : 'بنكي'}: ${refundAmount.toFixed(2)})` : ''}`,
       });
 
       return supRet;
@@ -1633,7 +1777,224 @@ export async function addExpenseRecord(
 }
 
 // ============================================================
-// FULL DATABASE BACKUP, ENCRYPTION & RESTORE
+// CASH SESSIONS / SHIFTS & DRAWER COUNT
+// ============================================================
+export interface CashSessionSummary {
+  openingBalance: number;
+  cashSales: number;
+  cashCollections: number;
+  cashRefunds: number;
+  cashExpenses: number;
+  cashSupplierPayments: number;
+  expectedCash: number;
+}
+
+export async function computeCashSessionSummary(
+  openedAt: string,
+  closedAt: string,
+  openingBalance: number
+): Promise<CashSessionSummary> {
+  const [allSales, allCustPays, allSaleReturns, allExpenses, allSupPays] = await Promise.all([
+    db.saleInvoices.toArray(),
+    db.customerPayments.toArray(),
+    db.saleReturns.toArray(),
+    db.expenses.toArray(),
+    db.supplierPayments.toArray(),
+  ]);
+
+  const inWindow = (iso: string) => iso >= openedAt && iso <= closedAt;
+
+  // Build map of sale invoices & immediate POS payment idempotency keys to avoid double-counting
+  const saleById = new Map<number, SaleInvoice>();
+  const immediatePosPayKeys = new Set<string>();
+  for (const s of allSales) {
+    if (s.id != null) saleById.set(s.id, s);
+    if (s.idempotencyKey) immediatePosPayKeys.add(`${s.idempotencyKey}-pay`);
+  }
+
+  // 1. Cash sales (immutable cash entered into drawer at sale time — never reduced by later returns which are counted in cashRefunds)
+  const cashSales = round2(
+    allSales
+      .filter((s) => s.status !== 'cancelled' && inWindow(s.date))
+      .reduce((sum, s) => {
+        const cashSplits = s.paymentSplits
+          .filter((p) => p.method === 'cash' && p.amount > 0)
+          .reduce((a, p) => a + p.amount, 0);
+        if (cashSplits <= 0) return sum;
+        const nonCashSplits = s.paymentSplits
+          .filter((p) => p.method !== 'cash' && p.amount > 0)
+          .reduce((a, p) => a + p.amount, 0);
+        const maxCashDue = Math.max(0, round2(s.total - (s.creditApplied ?? 0) - nonCashSplits));
+        const netCashReceived = Math.min(cashSplits, maxCashDue);
+        return sum + Math.max(0, netCashReceived);
+      }, 0)
+  );
+
+  // 2. Cash collections (non-cancelled cash customerPayments excluding immediate POS sale payments)
+  const cashCollections = round2(
+    allCustPays
+      .filter(
+        (p) =>
+          !p.isCancelled &&
+          p.paymentMethod === 'cash' &&
+          inWindow(p.date) &&
+          !(p.idempotencyKey && immediatePosPayKeys.has(p.idempotencyKey)) &&
+          !(p.notes && p.notes.startsWith('أداء فوري عند البيع'))
+      )
+      .reduce((sum, p) => sum + p.amount, 0)
+  );
+
+  // 3. Cash refunds (saleReturns with cash refund on non-cancelled invoices)
+  const cashRefunds = round2(
+    allSaleReturns
+      .filter((r) => {
+        if (r.refundMethod !== 'cash' || !inWindow(r.date)) return false;
+        const orig = saleById.get(r.saleInvoiceId);
+        return !orig || orig.status !== 'cancelled';
+      })
+      .reduce((sum, r) => sum + (r.cashRefund !== undefined ? r.cashRefund : r.totalAmount), 0)
+  );
+
+  // 4. Cash expenses
+  const cashExpenses = round2(
+    allExpenses
+      .filter((e) => !e.isCancelled && e.paymentMethod === 'cash' && inWindow(e.date))
+      .reduce((sum, e) => sum + e.amount, 0)
+  );
+
+  // 5. Cash supplier payments
+  const cashSupplierPayments = round2(
+    allSupPays
+      .filter((p) => !p.isCancelled && p.paymentMethod === 'cash' && inWindow(p.date))
+      .reduce((sum, p) => sum + p.amount, 0)
+  );
+
+  const expectedCash = round2(
+    openingBalance +
+      cashSales +
+      cashCollections -
+      cashRefunds -
+      cashExpenses -
+      cashSupplierPayments
+  );
+
+  return {
+    openingBalance: round2(openingBalance),
+    cashSales,
+    cashCollections,
+    cashRefunds,
+    cashExpenses,
+    cashSupplierPayments,
+    expectedCash,
+  };
+}
+
+export async function getActiveCashSession(): Promise<CashSession | undefined> {
+  return db.cashSessions.where('status').equals('open').first();
+}
+
+export async function openCashSession(
+  openingBalance: number,
+  user: AppUser,
+  notes?: string
+): Promise<CashSession> {
+  assertPermission(user, 'canSell', 'ليس لديك صلاحية فتح وردية الصندوق');
+  if (openingBalance < 0 || Number.isNaN(openingBalance)) {
+    throw new Error('رصيد الافتتاح يجب أن يكون صفراً أو أكبر');
+  }
+
+  return db.transaction('rw', [db.cashSessions, db.auditLogs], async () => {
+    const active = await db.cashSessions.where('status').equals('open').first();
+    if (active) {
+      throw new Error('توجد وردية صندوق مفتوحة بالفعل — يرجى إغلاقها أولاً');
+    }
+    const nowIso = new Date().toISOString();
+    const cleanOpening = round2(openingBalance);
+    const session: CashSession = {
+      status: 'open',
+      openedAt: nowIso,
+      openedByUserId: user.id ?? 1,
+      openedByUserName: user.fullName,
+      openingBalance: cleanOpening,
+      cashSales: 0,
+      cashCollections: 0,
+      cashRefunds: 0,
+      cashExpenses: 0,
+      cashSupplierPayments: 0,
+      expectedCash: cleanOpening,
+      notes: notes?.trim() || undefined,
+    };
+    const id = await db.cashSessions.add(session);
+    session.id = id;
+
+    await db.auditLogs.add({
+      date: nowIso,
+      userId: user.id ?? 1,
+      userName: user.fullName,
+      action: 'CASH_SESSION_OPENED',
+      entityType: 'cashSession',
+      entityId: String(id),
+      details: `فتح وردية صندوق #${id} برصيد افتتاحي ${cleanOpening.toFixed(2)}`,
+    });
+
+    return session;
+  });
+}
+
+export async function closeCashSession(
+  sessionId: number,
+  countedCash: number,
+  user: AppUser,
+  notes?: string
+): Promise<CashSession> {
+  assertPermission(user, 'canSell', 'ليس لديك صلاحية إغلاق وردية الصندوق');
+  if (countedCash < 0 || Number.isNaN(countedCash)) {
+    throw new Error('النقد المعدود يجب أن يكون صفراً أو أكبر');
+  }
+
+  const session = await db.cashSessions.get(sessionId);
+  if (!session) throw new Error('الوردية غير موجودة');
+  if (session.status !== 'open') throw new Error('الوردية مغلقة مسبقاً');
+
+  const closedAt = new Date().toISOString();
+  const summary = await computeCashSessionSummary(
+    session.openedAt,
+    closedAt,
+    session.openingBalance
+  );
+  const cleanCounted = round2(countedCash);
+  const variance = round2(cleanCounted - summary.expectedCash);
+
+  const updatedFields: Partial<CashSession> = {
+    status: 'closed',
+    closedAt,
+    closedByUserId: user.id ?? 1,
+    closedByUserName: user.fullName,
+    cashSales: summary.cashSales,
+    cashCollections: summary.cashCollections,
+    cashRefunds: summary.cashRefunds,
+    cashExpenses: summary.cashExpenses,
+    cashSupplierPayments: summary.cashSupplierPayments,
+    expectedCash: summary.expectedCash,
+    countedCash: cleanCounted,
+    variance,
+    notes: notes?.trim() || session.notes,
+  };
+
+  await db.cashSessions.update(sessionId, updatedFields);
+  await logAudit(
+    user,
+    'CASH_SESSION_CLOSED',
+    'cashSession',
+    sessionId,
+    `إغلاق وردية #${sessionId} — المتوقع: ${summary.expectedCash.toFixed(2)} — المعدود: ${cleanCounted.toFixed(2)} — الفارق: ${variance >= 0 ? '+' : ''}${variance.toFixed(2)}`
+  );
+
+  return { ...session, ...updatedFields };
+}
+
+// ============================================================
+// FULL DATABASE BACKUP, ENCRYPTION & RESTORE (External Folder + Daily Download Fallback)
 // ============================================================
 export async function exportDatabaseSnapshot(): Promise<{
   rawJson: string;
@@ -1641,7 +2002,7 @@ export async function exportDatabaseSnapshot(): Promise<{
   sizeBytes: number;
 }> {
   const data = {
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     tables: {
       users: await db.users.toArray(),
@@ -1660,6 +2021,7 @@ export async function exportDatabaseSnapshot(): Promise<{
       customerPayments: await db.customerPayments.toArray(),
       supplierPayments: await db.supplierPayments.toArray(),
       expenses: await db.expenses.toArray(),
+      cashSessions: await db.cashSessions.toArray(),
       auditLogs: await db.auditLogs.toArray(),
       loginLogs: await db.loginLogs.toArray(),
       settings: await db.settings.toArray(),
@@ -1671,71 +2033,110 @@ export async function exportDatabaseSnapshot(): Promise<{
   return { rawJson, checksum, sizeBytes };
 }
 
+export interface CreateBackupOptions {
+  skipExternalWrite?: boolean;
+  forceDownload?: boolean;
+  allowUnencryptedFallback?: boolean;
+}
+
 export async function createBackupRecord(
   type: 'manual' | 'auto',
   label: string,
   passphrase: string | null,
-  user: AppUser
+  user: AppUser,
+  options?: CreateBackupOptions
 ) {
+  const settings = (await db.settings.get(1)) ?? createDefaultSettings();
+  const cleanPass = passphrase?.trim() ?? '';
+  if (
+    settings.backupConfig.encryptBackupsDefault &&
+    !cleanPass &&
+    !options?.allowUnencryptedFallback
+  ) {
+    throw new Error(
+      'التشفير مفعّل افتراضياً — يرجى إدخال كلمة مرور للتشفير / Le chiffrement est activé par défaut — veuillez saisir un mot de passe'
+    );
+  }
+
   const { rawJson, checksum } = await exportDatabaseSnapshot();
-  const encrypted = Boolean(passphrase && passphrase.trim().length > 0);
+  const encrypted = cleanPass.length > 0;
   const payload = encrypted
-    ? await encryptBackupPayload(rawJson, passphrase!.trim())
+    ? await encryptBackupPayload(rawJson, cleanPass)
     : rawJson;
 
+  const nowIso = new Date().toISOString();
   const envelope = JSON.stringify({
     app: 'MatjarProRetailDB',
-    version: 1,
-    createdAt: new Date().toISOString(),
+    version: 2,
+    createdAt: nowIso,
     encrypted,
     checksum,
     payload,
   });
 
+  const stamp = nowIso.replace(/[:.]/g, '-');
+  const fileName = `RM_POS_GC_${type}_${stamp}.${encrypted ? 'enc.json' : 'json'}`;
+
+  let storageLocation: 'directory' | 'download' | 'metadata_only' = 'metadata_only';
+  let folderName: string | undefined;
+
+  if (!options?.skipExternalWrite) {
+    const ext = await saveBackupExternally(fileName, envelope, {
+      forceDownload: options?.forceDownload,
+    });
+    storageLocation = ext.storageLocation;
+    folderName = ext.folderName;
+  }
+
+  // Store ONLY lightweight metadata in IndexedDB — never store full payloadJson inside IndexedDB
   const sizeBytes = new Blob([envelope]).size;
   const id = await db.backups.add({
-    date: new Date().toISOString(),
+    date: nowIso,
     type,
     sizeBytes,
     encrypted,
     checksum,
     label,
-    payloadJson: envelope,
+    fileName,
+    storageLocation,
+    folderName,
   });
 
-  // Enforce max retained backups
-  const settings = await db.settings.get(1);
-  const maxKeep = settings?.backupConfig.maxRetainedBackups ?? 10;
+  // Enforce max retained backup metadata rows
+  const maxKeep = settings.backupConfig.maxRetainedBackups ?? 10;
   const all = await db.backups.orderBy('date').toArray();
   if (all.length > maxKeep) {
     const toDelete = all.slice(0, all.length - maxKeep).map((b) => b.id!);
     await db.backups.bulkDelete(toDelete);
   }
 
-  if (type === 'auto' && settings) {
-    await db.settings.update(1, {
-      backupConfig: {
-        ...settings.backupConfig,
-        lastAutoBackupAt: new Date().toISOString(),
-      },
-    });
-  }
+  const nextBackupConfig = {
+    ...settings.backupConfig,
+    ...(type === 'auto' ? { lastAutoBackupAt: nowIso } : {}),
+    ...(storageLocation === 'directory' || storageLocation === 'download'
+      ? { lastExternalExportAt: nowIso }
+      : {}),
+    ...(folderName ? { externalFolderName: folderName } : {}),
+  };
+  await db.settings.update(1, { backupConfig: nextBackupConfig });
 
   await logAudit(
     user,
     'BACKUP_CREATED',
     'backup',
     id,
-    `إنشاء نسخة احتياطية (${type === 'manual' ? 'يدوية' : 'تلقائية'}${encrypted ? ' مشفرة' : ''}): ${label}`
+    `إنشاء نسخة احتياطية (${type === 'manual' ? 'يدوية' : 'تلقائية'}${encrypted ? ' مشفرة' : ''}): ${label} [${storageLocation === 'directory' ? `مجلد: ${folderName || 'خارجي'}` : storageLocation === 'download' ? 'تنزيل ملف' : 'سجل'}]`,
+    false
   );
 
-  return { id, envelope, sizeBytes, checksum, encrypted };
+  return { id, envelope, sizeBytes, checksum, encrypted, fileName, storageLocation, folderName };
 }
 
 export async function restoreDatabaseFromEnvelope(
   envelopeText: string,
   passphrase: string | null,
-  user: AppUser
+  user: AppUser,
+  options?: { preBackupPassphrase?: string | null; skipExternalWrite?: boolean }
 ): Promise<void> {
   assertPermission(user, 'canManageSettings', 'ليس لديك صلاحية استعادة النسخ الاحتياطية');
   const parsedEnvelope = JSON.parse(envelopeText);
@@ -1769,6 +2170,19 @@ export async function restoreDatabaseFromEnvelope(
     throw new Error('بنية النسخة الاحتياطية غير مكتملة');
   }
 
+  // Automatic safety backup BEFORE overwriting the database
+  await createBackupRecord(
+    'auto',
+    'نسخة أمان تلقائية قبل الاستعادة',
+    options?.preBackupPassphrase ?? passphrase ?? null,
+    user,
+    {
+      allowUnencryptedFallback: true,
+      skipExternalWrite: options?.skipExternalWrite,
+      forceDownload: !options?.skipExternalWrite,
+    }
+  );
+
   await db.transaction(
     'rw',
     [
@@ -1788,6 +2202,7 @@ export async function restoreDatabaseFromEnvelope(
       db.customerPayments,
       db.supplierPayments,
       db.expenses,
+      db.cashSessions,
       db.auditLogs,
       db.loginLogs,
       db.settings,
@@ -1810,6 +2225,7 @@ export async function restoreDatabaseFromEnvelope(
         db.customerPayments.clear(),
         db.supplierPayments.clear(),
         db.expenses.clear(),
+        db.cashSessions.clear(),
         db.auditLogs.clear(),
         db.loginLogs.clear(),
         db.settings.clear(),
@@ -1831,6 +2247,7 @@ export async function restoreDatabaseFromEnvelope(
       if (t.customerPayments?.length) await db.customerPayments.bulkAdd(t.customerPayments);
       if (t.supplierPayments?.length) await db.supplierPayments.bulkAdd(t.supplierPayments);
       if (t.expenses?.length) await db.expenses.bulkAdd(t.expenses);
+      if (t.cashSessions?.length) await db.cashSessions.bulkAdd(t.cashSessions);
       if (t.auditLogs?.length) await db.auditLogs.bulkAdd(t.auditLogs);
       if (t.loginLogs?.length) await db.loginLogs.bulkAdd(t.loginLogs);
       if (t.settings?.length) await db.settings.bulkPut(t.settings);
@@ -1842,14 +2259,31 @@ export async function restoreDatabaseFromEnvelope(
         action: 'BACKUP_RESTORED',
         entityType: 'database',
         entityId: '1',
-        details: 'استعادة كاملة لقاعدة البيانات بعد التحقق من سلامة النسخة',
+        details: 'استعادة كاملة لقاعدة البيانات بعد إنشاء نسخة أمان والتحقق من السلامة',
       });
     }
   );
 }
 
-export async function clearBusinessDataForFreshStart(user: AppUser): Promise<void> {
+export async function clearBusinessDataForFreshStart(
+  user: AppUser,
+  options?: { backupPassphrase?: string | null; skipExternalWrite?: boolean }
+): Promise<void> {
   assertPermission(user, 'canManageSettings', 'ليس لديك صلاحية تصفير قاعدة البيانات');
+
+  // Automatic safety backup BEFORE wiping business data & audit logs
+  await createBackupRecord(
+    'auto',
+    'نسخة أمان تلقائية قبل تصفير البيانات',
+    options?.backupPassphrase ?? null,
+    user,
+    {
+      allowUnencryptedFallback: true,
+      skipExternalWrite: options?.skipExternalWrite,
+      forceDownload: !options?.skipExternalWrite,
+    }
+  );
+
   await db.transaction(
     'rw',
     [
@@ -1868,6 +2302,7 @@ export async function clearBusinessDataForFreshStart(user: AppUser): Promise<voi
       db.customerPayments,
       db.supplierPayments,
       db.expenses,
+      db.cashSessions,
       db.auditLogs,
       db.settings,
     ],
@@ -1888,6 +2323,8 @@ export async function clearBusinessDataForFreshStart(user: AppUser): Promise<voi
         db.customerPayments.clear(),
         db.supplierPayments.clear(),
         db.expenses.clear(),
+        db.cashSessions.clear(),
+        db.auditLogs.clear(),
       ]);
 
       // Keep walk-in cash customer #1
@@ -1913,18 +2350,115 @@ export async function clearBusinessDataForFreshStart(user: AppUser): Promise<voi
           supplierPaymentNextRef: 1,
         },
       });
-
-      await db.auditLogs.add({
-        date: new Date().toISOString(),
-        userId: user.id ?? 1,
-        userName: user.fullName,
-        action: 'DB_RESET_FRESH',
-        entityType: 'database',
-        entityId: '1',
-        details: 'تصفير المعاملات والبيانات للبدء التجاري الفعلي',
-      });
     }
   );
+}
+
+// ============================================================
+// PRODUCTS (Opening Balance Stock Movement + Read-Only Qty on Edit)
+// ============================================================
+export async function createProductWithOpeningStock(
+  data: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>,
+  user: AppUser
+): Promise<number> {
+  assertPermission(user, 'canManageProducts', 'ليس لديك صلاحية إضافة المنتجات');
+  return db.transaction('rw', [db.products, db.stockMovements, db.auditLogs], async () => {
+    const nowIso = new Date().toISOString();
+    const initialQty = round2(Math.max(0, Number(data.quantity) || 0));
+
+    const productId = await db.products.add({
+      ...data,
+      quantity: initialQty,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    if (initialQty > 0) {
+      await db.stockMovements.add({
+        date: nowIso,
+        productId,
+        productName: data.name,
+        barcode: data.barcode,
+        type: 'opening_balance',
+        quantityDelta: initialQty,
+        beforeQty: 0,
+        afterQty: initialQty,
+        unitCost: data.purchasePrice,
+        unitPrice: data.salePrice,
+        referenceNumber: `OPEN-${productId}`,
+        userId: user.id ?? 1,
+        userName: user.fullName,
+        note: 'رصيد افتتاحي عند إنشاء المنتج',
+      });
+    }
+
+    await db.auditLogs.add({
+      date: nowIso,
+      userId: user.id ?? 1,
+      userName: user.fullName,
+      action: 'PRODUCT_CREATED',
+      entityType: 'product',
+      entityId: String(productId),
+      details: `إضافة منتج جديد: ${data.name}${initialQty > 0 ? ` (رصيد افتتاحي: ${initialQty})` : ''}`,
+    });
+
+    return productId;
+  });
+}
+
+export async function importProductsWithOpeningStock(
+  items: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>[],
+  user: AppUser
+): Promise<number> {
+  assertPermission(user, 'canManageProducts', 'ليس لديك صلاحية استيراد المنتجات');
+  if (!items.length) return 0;
+
+  return db.transaction('rw', [db.products, db.stockMovements, db.auditLogs], async () => {
+    const nowIso = new Date().toISOString();
+    let count = 0;
+
+    for (const data of items) {
+      const initialQty = round2(Math.max(0, Number(data.quantity) || 0));
+      const productId = await db.products.add({
+        ...data,
+        quantity: initialQty,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+
+      if (initialQty > 0) {
+        await db.stockMovements.add({
+          date: nowIso,
+          productId,
+          productName: data.name,
+          barcode: data.barcode,
+          type: 'opening_balance',
+          quantityDelta: initialQty,
+          beforeQty: 0,
+          afterQty: initialQty,
+          unitCost: data.purchasePrice,
+          unitPrice: data.salePrice,
+          referenceNumber: `IMP-${productId}`,
+          userId: user.id ?? 1,
+          userName: user.fullName,
+          note: 'رصيد افتتاحي عبر استيراد Excel',
+        });
+      }
+      count += 1;
+    }
+
+    await db.auditLogs.add({
+      date: nowIso,
+      userId: user.id ?? 1,
+      userName: user.fullName,
+      action: 'PRODUCTS_IMPORTED',
+      entityType: 'product',
+      entityId: String(count),
+      details: `استيراد ${count} منتجاً مع تسجيل حركات الرصيد الافتتاحي`,
+    });
+
+    return count;
+  });
 }
 
 export async function updateProductWithPriceHistory(
@@ -1938,8 +2472,12 @@ export async function updateProductWithPriceHistory(
     if (!existing) throw new Error('المنتج غير موجود');
     const nowIso = new Date().toISOString();
 
-    const newPurchase = updates.purchasePrice ?? existing.purchasePrice;
-    const newSale = updates.salePrice ?? existing.salePrice;
+    // Strip quantity — stock can only change via stock movements (adjustProductStock / invoices / returns)
+    const { quantity: _ignoredQuantity, ...safeUpdates } = updates;
+    void _ignoredQuantity;
+
+    const newPurchase = safeUpdates.purchasePrice ?? existing.purchasePrice;
+    const newSale = safeUpdates.salePrice ?? existing.salePrice;
 
     if (
       Math.abs(newPurchase - existing.purchasePrice) > 0.005 ||
@@ -1947,7 +2485,7 @@ export async function updateProductWithPriceHistory(
     ) {
       await db.priceHistory.add({
         productId,
-        productName: updates.name ?? existing.name,
+        productName: safeUpdates.name ?? existing.name,
         oldPurchasePrice: existing.purchasePrice,
         newPurchasePrice: newPurchase,
         oldSalePrice: existing.salePrice,
@@ -1958,7 +2496,7 @@ export async function updateProductWithPriceHistory(
       });
     }
 
-    await db.products.update(productId, { ...updates, updatedAt: nowIso });
+    await db.products.update(productId, { ...safeUpdates, updatedAt: nowIso });
     await db.auditLogs.add({
       date: nowIso,
       userId: user.id ?? 1,
@@ -1966,7 +2504,7 @@ export async function updateProductWithPriceHistory(
       action: 'PRODUCT_UPDATED',
       entityType: 'product',
       entityId: String(productId),
-      details: `تعديل المنتج: ${updates.name ?? existing.name}`,
+      details: `تعديل المنتج: ${safeUpdates.name ?? existing.name}`,
     });
   });
 }

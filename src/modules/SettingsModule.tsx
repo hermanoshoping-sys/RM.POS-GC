@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  Building2,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -11,13 +12,19 @@ import {
   Database,
   Download,
   FileText,
+  FolderOpen,
+  FolderX,
   HardDrive,
   Image as ImageIcon,
   Inbox,
+  KeyRound,
   LayoutTemplate,
   Lock,
+  LogOut,
+  Mail,
   PanelBottom,
   PanelTop,
+  Phone,
   Plug,
   Printer,
   RefreshCw,
@@ -30,18 +37,20 @@ import {
   UserPlus,
 } from 'lucide-react';
 import {
-  ADMIN_PERMISSIONS,
-  CASHIER_PERMISSIONS,
   createDefaultSettings,
   db,
-  MANAGER_PERMISSIONS,
 } from '../db/database';
 import {
+  createStaffUserInActiveAccount,
+  syncAccountMembersFromActiveDb,
+  syncAccountStoreMetadata,
+} from '../db/accountsDb';
+import {
   clearBusinessDataForFreshStart,
+  cloneSaleInvoiceAsNew,
   createBackupRecord,
   exportDatabaseSnapshot,
   logAudit,
-  restoreCancelledSaleInvoice,
   restoreDatabaseFromEnvelope,
   updateSettingsSection,
 } from '../db/operations';
@@ -65,9 +74,16 @@ import {
   openCashDrawer,
   pairCashDrawerSerialPort,
 } from '../utils/cashDrawer';
+import {
+  clearSavedBackupDirectoryHandle,
+  getSavedBackupDirectoryHandle,
+  isDirectoryPickerSupported,
+  pickExternalBackupDirectory,
+  readBackupFromExternalDirectory,
+} from '../utils/backupStorage';
 import { generateSalt, hashPassword } from '../utils/crypto';
 import { downloadTextFile } from '../utils/export';
-import { PERMISSION_LABELS, PermissionKey } from '../utils/permissions';
+import { BooleanPermissionKey, getMaxDiscountPercent, PERMISSION_LABELS } from '../utils/permissions';
 import { formatDateTime, t } from '../i18n/translations';
 
 export type SettingsTabId = 'security' | 'store' | 'printing' | 'invoice' | 'backup';
@@ -86,6 +102,10 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
     setLang,
     settings,
     currentUser,
+    activeAccount,
+    accounts,
+    refreshAccounts,
+    signOutAccount,
     notify,
     openPrint,
     requestGuardedAction,
@@ -93,6 +113,9 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
     storageInfo,
     requestPersistentStorage,
     runAutoBackupNow,
+    hasSessionBackupPassphrase,
+    getSessionBackupPassphrase,
+    setSessionBackupPassphrase,
   } = useApp();
 
   const [internalTab, setInternalTab] = useState<SettingsTabId>('security');
@@ -103,10 +126,28 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
   };
 
   const users = useLiveQuery(() => db.users.toArray(), []) ?? [];
-  const auditLogs = useLiveQuery(() => db.auditLogs.orderBy('date').reverse().limit(80).toArray(), []) ?? [];
-  const loginLogs = useLiveQuery(() => db.loginLogs.orderBy('date').reverse().limit(50).toArray(), []) ?? [];
-  const backups = useLiveQuery(() => db.backups.orderBy('date').reverse().toArray(), []) ?? [];
-  const latestSale = useLiveQuery(() => db.saleInvoices.orderBy('date').reverse().first(), []);
+  const auditLogs = useLiveQuery(
+    () => (subTab === 'security' ? db.auditLogs.orderBy('date').reverse().limit(80).toArray() : []),
+    [subTab]
+  ) ?? [];
+  const loginLogs = useLiveQuery(
+    () => (subTab === 'security' ? db.loginLogs.orderBy('date').reverse().limit(50).toArray() : []),
+    [subTab]
+  ) ?? [];
+  // Load ONLY lightweight backup metadata and ONLY when the backup tab is open (never load full payloads in memory)
+  const backups =
+    useLiveQuery(async () => {
+      if (subTab !== 'backup') return [];
+      const rows = await db.backups.orderBy('date').reverse().toArray();
+      return rows.map(({ payloadJson, ...meta }) => ({
+        ...meta,
+        hasLegacyPayload: Boolean(payloadJson),
+      }));
+    }, [subTab]) ?? [];
+  const latestSale = useLiveQuery(
+    () => (subTab === 'invoice' || subTab === 'printing' ? db.saleInvoices.orderBy('date').reverse().first() : undefined),
+    [subTab]
+  );
 
   // 12.1 Security form states
   const [newLoginPwd, setNewLoginPwd] = useState('');
@@ -115,6 +156,8 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
   const [newUserForm, setNewUserForm] = useState({
     username: '',
     fullName: '',
+    email: '',
+    phone: '',
     role: 'cashier' as UserRole,
     password: '',
   });
@@ -154,6 +197,20 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
   const [backupPassphrase, setBackupPassphrase] = useState('');
   const [restorePassphrase, setRestorePassphrase] = useState('');
   const [backupLabel, setBackupLabel] = useState('');
+  const [externalFolderName, setExternalFolderName] = useState<string | null>(
+    settings.backupConfig.externalFolderName ?? null
+  );
+  const directoryPickerSupported = isDirectoryPickerSupported();
+
+  React.useEffect(() => {
+    if (subTab !== 'backup') return;
+    getSavedBackupDirectoryHandle()
+      .then((h) => {
+        if (h?.name) setExternalFolderName(h.name);
+        else setExternalFolderName(null);
+      })
+      .catch(() => setExternalFolderName(null));
+  }, [subTab]);
 
   const previewSampleInvoice: SaleInvoice = useMemo(() => {
     if (latestSale) return latestSale;
@@ -248,45 +305,40 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
 
   const handleAddUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentUser || !newUserForm.username.trim() || newUserForm.password.length < 4) return;
-    const exists = await db.users.where('username').equals(newUserForm.username.trim()).first();
-    if (exists) {
-      notify(t(lang, 'اسم المستخدم موجود مسبقاً', 'Nom d’utilisateur déjà pris'), 'error');
-      return;
+    if (!currentUser) return;
+    try {
+      await createStaffUserInActiveAccount(
+        activeAccount?.accountId ?? null,
+        {
+          username: newUserForm.username,
+          fullName: newUserForm.fullName,
+          email: newUserForm.email || undefined,
+          phone: newUserForm.phone || undefined,
+          role: newUserForm.role,
+          password: newUserForm.password,
+        },
+        currentUser
+      );
+      setNewUserForm({ username: '', fullName: '', email: '', phone: '', role: 'cashier', password: '' });
+      notify(t(lang, 'تمت إضافة المستخدم داخل هذا الحساب بنجاح', 'Utilisateur créé dans ce compte'));
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err), 'error');
     }
-    const salt = generateSalt();
-    const hash = await hashPassword(newUserForm.password, salt);
-    const perms =
-      newUserForm.role === 'admin'
-        ? ADMIN_PERMISSIONS
-        : newUserForm.role === 'manager'
-          ? MANAGER_PERMISSIONS
-          : CASHIER_PERMISSIONS;
-    const id = await db.users.add({
-      username: newUserForm.username.trim(),
-      fullName: newUserForm.fullName.trim() || newUserForm.username.trim(),
-      role: newUserForm.role,
-      passwordHash: hash,
-      passwordSalt: salt,
-      permissions: perms,
-      isActive: true,
-      createdAt: new Date().toISOString(),
-    });
-    await logAudit(currentUser, 'USER_CREATED', 'user', id, `إنشاء مستخدم جديد: ${newUserForm.username} (${newUserForm.role})`);
-    setNewUserForm({ username: '', fullName: '', role: 'cashier', password: '' });
-    notify(t(lang, 'تمت إضافة المستخدم بنجاح', 'Utilisateur créé'));
   };
 
   const toggleUserActive = async (u: AppUser) => {
-    if (u.username === 'admin') return;
+    if (u.role === 'admin' && u.id === currentUser?.id) return;
     await db.users.update(u.id!, { isActive: !u.isActive });
+    if (activeAccount) {
+      await syncAccountMembersFromActiveDb(activeAccount.accountId);
+    }
     if (currentUser) {
       await logAudit(currentUser, 'USER_TOGGLED', 'user', u.id!, `تغيير حالة المستخدم ${u.username}`);
     }
   };
 
-  const handleToggleUserPermission = async (u: AppUser, key: PermissionKey) => {
-    if (u.username === 'admin' || !currentUser) return;
+  const handleToggleUserPermission = async (u: AppUser, key: BooleanPermissionKey) => {
+    if (u.role === 'admin' || !currentUser) return;
     const nextPerms = { ...u.permissions, [key]: !u.permissions[key] };
     await db.users.update(u.id!, { permissions: nextPerms });
     await logAudit(
@@ -298,14 +350,34 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
     );
   };
 
-  const handleRestoreCancelled = async (entityId: string, auditLogId: number) => {
+  const handleUpdateMaxDiscount = async (u: AppUser, pct: number) => {
+    if (u.role === 'admin' || !currentUser) return;
+    const clamped = Math.min(100, Math.max(0, Number.isFinite(pct) ? pct : 0));
+    const nextPerms = { ...u.permissions, maxDiscountPercent: clamped };
+    await db.users.update(u.id!, { permissions: nextPerms });
+    await logAudit(
+      currentUser,
+      'USER_PERMISSIONS_UPDATED',
+      'user',
+      u.id!,
+      `تعديل سقف الخصم الأقصى للمستخدم ${u.username} إلى ${clamped}%`
+    );
+  };
+
+  const handleCloneCancelled = async (entityId: string, auditLogId: number) => {
     if (!currentUser?.permissions.canRestoreCancelled) {
-      notify(t(lang, 'ليس لديك صلاحية استعادة العمليات الملغاة', 'Permission refusée'), 'error');
+      notify(t(lang, 'ليس لديك صلاحية نسخ الفواتير الملغاة', 'Permission refusée'), 'error');
       return;
     }
     try {
-      await restoreCancelledSaleInvoice(Number(entityId), auditLogId, currentUser);
-      notify(t(lang, 'تمت استعادة الفاتورة الملغاة وتحديث المخزون', 'Facture annulée restaurée'));
+      const cloned = await cloneSaleInvoiceAsNew(Number(entityId), currentUser, auditLogId);
+      notify(
+        t(
+          lang,
+          `تم نسخ الفاتورة الملغاة كفاتورة جديدة رقم ${cloned.invoiceNumber}`,
+          `Facture annulée clonée en nouvelle facture ${cloned.invoiceNumber}`
+        )
+      );
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err), 'error');
     }
@@ -332,6 +404,12 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
       currentUser,
       'تحديث بيانات السوبر مارشي وإعدادات نقطة البيع'
     );
+    if (activeAccount && storeForm.storeName.trim()) {
+      await syncAccountStoreMetadata(activeAccount.accountId, {
+        storeName: storeForm.storeName.trim(),
+      });
+      await refreshAccounts();
+    }
     setLang(storeForm.defaultLanguage);
     notify(t(lang, 'تم حفظ بيانات المتجر بنجاح', 'Informations enregistrées'));
   };
@@ -459,59 +537,72 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
     notify(t(lang, 'تم حفظ إعدادات الهيدر والفوتر ومقاسات الشعار بنجاح', 'Design, en-tête, pied de page et logo enregistrés'));
   };
 
-  // 12.5 Backup & Restore Handlers
-  const handleCreateManualBackup = async (downloadFile: boolean, useFolderPicker = false) => {
+  // 12.5 Backup & Restore Handlers (External Folder via showDirectoryPicker + Daily Download Fallback)
+  const handlePickExternalBackupFolder = async () => {
+    if (!currentUser) return;
+    try {
+      const picked = await pickExternalBackupDirectory();
+      if (!picked) return;
+      setExternalFolderName(picked.name);
+      await updateSettingsSection(
+        (c) => ({ ...c, backupConfig: { ...c.backupConfig, externalFolderName: picked.name } }),
+        currentUser,
+        `ربط مجلد النسخ الاحتياطي الخارجي: ${picked.name}`
+      );
+      notify(
+        t(
+          lang,
+          `تم ربط مجلد النسخ الاحتياطي الخارجي: ${picked.name}`,
+          `Dossier de sauvegarde externe lié : ${picked.name}`
+        )
+      );
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  const handleDisconnectExternalFolder = async () => {
+    if (!currentUser) return;
+    await clearSavedBackupDirectoryHandle();
+    setExternalFolderName(null);
+    await updateSettingsSection(
+      (c) => ({ ...c, backupConfig: { ...c.backupConfig, externalFolderName: null } }),
+      currentUser,
+      'إلغاء ربط مجلد النسخ الاحتياطي الخارجي'
+    );
+    notify(
+      t(
+        lang,
+        'تم فصل المجلد الخارجي — سيُستخدم التنزيل التلقائي اليومي كبديل',
+        'Dossier déconnecté — le téléchargement quotidien servira de repli'
+      ),
+      'info'
+    );
+  };
+
+  const handleCreateManualBackup = async (forceDownload: boolean) => {
     if (!currentUser) return;
     try {
       const label =
         backupLabel.trim() ||
         `نسخة يدوية ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
-      const res = await createBackupRecord(
-        'manual',
-        label,
-        backupPassphrase.trim() || null,
-        currentUser
-      );
-      const fileName = `matjarpro_backup_${new Date().toISOString().slice(0, 10)}${res.encrypted ? '.enc' : ''}.json`;
-
-      if (useFolderPicker && 'showSaveFilePicker' in window) {
-        try {
-          const handle = await (
-            window as unknown as {
-              showSaveFilePicker: (opts: unknown) => Promise<{
-                createWritable: () => Promise<{ write: (s: string) => Promise<void>; close: () => Promise<void> }>;
-              }>;
-            }
-          ).showSaveFilePicker({ suggestedName: fileName });
-          const writable = await handle.createWritable();
-          await writable.write(res.envelope);
-          await writable.close();
-          await updateSettingsSection(
-            (c) => ({ ...c, backupConfig: { ...c.backupConfig, lastExternalExportAt: new Date().toISOString() } }),
-            currentUser,
-            'تحديث تاريخ آخر تصدير خارجي للنسخة الاحتياطية'
-          );
-          notify(t(lang, 'تم حفظ النسخة الاحتياطية في المجلد الخارجي بنجاح', 'Sauvegarde enregistrée dans le dossier'));
-          return;
-        } catch {
-          // User cancelled picker or sandbox fallback -> regular download
-        }
+      const effectivePass = backupPassphrase.trim() || getSessionBackupPassphrase() || null;
+      if (backupPassphrase.trim()) {
+        setSessionBackupPassphrase(backupPassphrase.trim());
       }
-
-      if (downloadFile) {
-        downloadTextFile(res.envelope, fileName);
-        await updateSettingsSection(
-          (c) => ({ ...c, backupConfig: { ...c.backupConfig, lastExternalExportAt: new Date().toISOString() } }),
-          currentUser,
-          'تصدير نسخة احتياطية كملف خارجي'
-        );
-      }
+      const res = await createBackupRecord('manual', label, effectivePass, currentUser, {
+        forceDownload,
+      });
       setBackupLabel('');
+      const locationMsg =
+        res.storageLocation === 'directory'
+          ? t(lang, `حُفظت في المجلد الخارجي (${res.folderName || ''})`, `Enregistrée dans le dossier (${res.folderName || ''})`)
+          : t(lang, 'تم تنزيل الملف على جهازك', 'Fichier téléchargé sur votre appareil');
       notify(
         t(
           lang,
-          `تم إنشاء النسخة الاحتياطية (${(res.sizeBytes / 1024).toFixed(1)} KB${res.encrypted ? ' · مشفرة AES-256' : ''})`,
-          `Sauvegarde créée (${(res.sizeBytes / 1024).toFixed(1)} KB)`
+          `تم إنشاء النسخة الاحتياطية (${(res.sizeBytes / 1024).toFixed(1)} KB${res.encrypted ? ' · AES-256' : ''}) — ${locationMsg}`,
+          `Sauvegarde créée (${(res.sizeBytes / 1024).toFixed(1)} KB${res.encrypted ? ' · AES-256' : ''}) — ${locationMsg}`
         )
       );
     } catch (err) {
@@ -524,8 +615,22 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
     if (!file || !currentUser) return;
     try {
       const text = await file.text();
-      await restoreDatabaseFromEnvelope(text, restorePassphrase.trim() || null, currentUser);
-      notify(t(lang, 'تم التحقق من سلامة النسخة واستعادة قاعدة البيانات بنجاح', 'Base de données restaurée'));
+      await restoreDatabaseFromEnvelope(
+        text,
+        restorePassphrase.trim() || getSessionBackupPassphrase() || null,
+        currentUser,
+        { preBackupPassphrase: getSessionBackupPassphrase() }
+      );
+      if (activeAccount) {
+        await syncAccountMembersFromActiveDb(activeAccount.accountId);
+      }
+      notify(
+        t(
+          lang,
+          'تم حفظ نسخة أمان تلقائية ثم استعادة قاعدة البيانات بنجاح',
+          'Sauvegarde de sécurité créée et base restaurée avec succès'
+        )
+      );
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -533,11 +638,48 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
     }
   };
 
-  const handleRestoreFromRecord = async (payloadJson: string) => {
+  const handleRestoreFromHistoryEntry = async (record: {
+    id?: number;
+    fileName?: string;
+    storageLocation?: 'directory' | 'download' | 'metadata_only' | 'legacy_idb';
+    hasLegacyPayload: boolean;
+  }) => {
     if (!currentUser) return;
     try {
-      await restoreDatabaseFromEnvelope(payloadJson, restorePassphrase.trim() || null, currentUser);
-      notify(t(lang, 'تمت استعادة النسخة الاحتياطية بنجاح', 'Sauvegarde restaurée'));
+      let envelopeText: string | null = null;
+      if (record.storageLocation === 'directory' && record.fileName) {
+        envelopeText = await readBackupFromExternalDirectory(record.fileName);
+      } else if (record.hasLegacyPayload && record.id) {
+        const full = await db.backups.get(record.id);
+        envelopeText = full?.payloadJson ?? null;
+      }
+      if (!envelopeText) {
+        notify(
+          t(
+            lang,
+            'هذا الملف محفوظ خارجياً على جهازك — اختره عبر زر «استعادة من ملف» أعلاه',
+            'Ce fichier est stocké hors navigateur — importez-le via « Restaurer un fichier »'
+          ),
+          'info'
+        );
+        return;
+      }
+      await restoreDatabaseFromEnvelope(
+        envelopeText,
+        restorePassphrase.trim() || getSessionBackupPassphrase() || null,
+        currentUser,
+        { preBackupPassphrase: getSessionBackupPassphrase() }
+      );
+      if (activeAccount) {
+        await syncAccountMembersFromActiveDb(activeAccount.accountId);
+      }
+      notify(
+        t(
+          lang,
+          'تم إنشاء نسخة أمان تلقائية واستعادة النسخة بنجاح',
+          'Sauvegarde de sécurité créée et restauration réussie'
+        )
+      );
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err), 'error');
     }
@@ -547,7 +689,7 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
     const snap = await exportDatabaseSnapshot();
     downloadTextFile(
       snap.rawJson,
-      `matjarpro_full_database_${new Date().toISOString().slice(0, 10)}.json`
+      `RM_POS_GC_full_database_${new Date().toISOString().slice(0, 10)}.json`
     );
     if (currentUser) {
       await updateSettingsSection(
@@ -565,13 +707,15 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
       title: t(lang, 'تصفير البيانات للبدء التجاري الفعلي', 'Réinitialiser la base pour démarrer'),
       description: t(
         lang,
-        'سيتم مسح جميع المنتجات والفواتير والزبناء والموردين والبدء من الصفر (مع الاحتفاظ بحساب المدير وإعدادات المتجر). يُنصح بأخذ نسخة احتياطية أولاً.',
-        'Toutes les transactions et fiches seront effacées (paramètres et compte admin conservés).'
+        'سيتم أولاً إنشاء نسخة احتياطية تلقائية للأمان، ثم مسح جميع المنتجات والفواتير والزبناء والموردين والورديات وسجل التدقيق والبدء من الصفر (مع الاحتفاظ بحسابات المستخدمين وإعدادات المتجر).',
+        'Une sauvegarde de sécurité automatique sera créée avant d’effacer produits, factures, clients, sessions et journal d’audit.'
       ),
       isSensitiveDelete: true,
       onConfirm: async () => {
-        await clearBusinessDataForFreshStart(currentUser);
-        notify(t(lang, 'تم تصفير قاعدة البيانات بنجاح', 'Base réinitialisée'));
+        await clearBusinessDataForFreshStart(currentUser, {
+          backupPassphrase: getSessionBackupPassphrase(),
+        });
+        notify(t(lang, 'تم حفظ نسخة أمان وتصفير قاعدة البيانات وسجل التدقيق بنجاح', 'Sauvegarde créée et base réinitialisée'));
       },
     });
   };
@@ -619,6 +763,68 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
       {/* 12.1 SECURITY */}
       {subTab === 'security' && (
         <div className="space-y-5">
+          {/* Active Independent Account & License Certificate Banner */}
+          {activeAccount && (
+            <div className="rounded-xl border-2 border-[#D9A738]/70 bg-gradient-to-r from-[#0B274D] via-[#103466] to-[#0B274D] p-4 sm:p-5 text-white shadow-sm">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Building2 className="h-5 w-5 text-[#FDE68A]" />
+                    <h3 className="text-sm sm:text-base font-black text-white">
+                      {activeAccount.storeName}
+                    </h3>
+                    <span className="rounded-md bg-emerald-500/20 border border-emerald-400/40 px-2 py-0.5 text-[11px] font-bold text-emerald-200">
+                      {t(lang, 'رخصة مفعّلة', 'Licence active')}
+                    </span>
+                    <span className="rounded-md bg-white/10 border border-white/20 px-2 py-0.5 text-[11px] font-semibold text-blue-100">
+                      {t(lang, 'قاعدة بيانات مستقلة', 'Base de données isolée')}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-blue-100">
+                    <span className="inline-flex items-center gap-1 font-mono font-bold text-[#FDE68A]">
+                      <KeyRound className="h-3.5 w-3.5" />
+                      {t(lang, 'رقم الرخصة:', 'Licence :')} {activeAccount.licenseNumber}
+                    </span>
+                    {activeAccount.ownerEmail && (
+                      <span className="inline-flex items-center gap-1 font-mono">
+                        <Mail className="h-3.5 w-3.5 text-blue-300" />
+                        {activeAccount.ownerEmail}
+                      </span>
+                    )}
+                    {activeAccount.ownerPhone && (
+                      <span className="inline-flex items-center gap-1 font-mono" dir="ltr">
+                        <Phone className="h-3.5 w-3.5 text-blue-300" />
+                        {activeAccount.ownerPhone}
+                      </span>
+                    )}
+                    <span className="text-[11px] text-blue-200">
+                      {t(lang, 'تاريخ التفعيل:', 'Activée le :')} {formatDateTime(activeAccount.activatedAt, lang)}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => signOutAccount('login')}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/25 bg-white/10 px-3 py-1.5 text-xs font-bold text-white hover:bg-white/20"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    {t(lang, `تبديل الحساب (${accounts.length})`, `Changer de compte (${accounts.length})`)}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => signOutAccount('register')}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#F2B83B] px-3 py-1.5 text-xs font-extrabold text-slate-950 hover:bg-[#FDE68A]"
+                  >
+                    <UserPlus className="h-3.5 w-3.5" />
+                    {t(lang, 'إنشاء حساب مستقل جديد', 'Nouveau compte')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
             <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4">
               <div className="flex items-center justify-between">
@@ -778,17 +984,34 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
               <form onSubmit={handleAddUser} className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <input
                   required
-                  placeholder={t(lang, 'اسم المستخدم', 'Identifiant')}
+                  minLength={3}
+                  placeholder={t(lang, 'اسم المستخدم *', 'Identifiant *')}
                   value={newUserForm.username}
                   onChange={(e) => setNewUserForm({ ...newUserForm, username: e.target.value })}
                   className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs"
                 />
                 <input
                   required
-                  placeholder={t(lang, 'الاسم الكامل', 'Nom complet')}
+                  placeholder={t(lang, 'الاسم الكامل *', 'Nom complet *')}
                   value={newUserForm.fullName}
                   onChange={(e) => setNewUserForm({ ...newUserForm, fullName: e.target.value })}
                   className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs"
+                />
+                <input
+                  type="email"
+                  dir="ltr"
+                  placeholder={t(lang, 'البريد الإلكتروني (اختياري للدخول)', 'E-mail (optionnel)')}
+                  value={newUserForm.email}
+                  onChange={(e) => setNewUserForm({ ...newUserForm, email: e.target.value })}
+                  className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-mono"
+                />
+                <input
+                  type="tel"
+                  dir="ltr"
+                  placeholder={t(lang, 'رقم الهاتف (اختياري للدخول)', 'Téléphone (optionnel)')}
+                  value={newUserForm.phone}
+                  onChange={(e) => setNewUserForm({ ...newUserForm, phone: e.target.value })}
+                  className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-mono"
                 />
                 <select
                   value={newUserForm.role}
@@ -802,8 +1025,8 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                 <input
                   required
                   type="password"
-                  minLength={4}
-                  placeholder={t(lang, 'كلمة السر', 'Mot de passe')}
+                  minLength={6}
+                  placeholder={t(lang, 'كلمة السر (6+ أحرف) *', 'Mot de passe (6+ car.) *')}
                   value={newUserForm.password}
                   onChange={(e) => setNewUserForm({ ...newUserForm, password: e.target.value })}
                   className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs"
@@ -813,20 +1036,20 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                   className="sm:col-span-2 inline-flex items-center justify-center gap-1.5 rounded-lg bg-teal-700 py-2 text-xs font-semibold text-white hover:bg-teal-800"
                 >
                   <UserPlus className="h-3.5 w-3.5" />
-                  {t(lang, 'إضافة مستخدم جديد', 'Ajouter utilisateur')}
+                  {t(lang, 'إضافة مستخدم جديد داخل هذا الحساب', 'Ajouter un utilisateur à ce compte')}
                 </button>
               </form>
 
               <div className="rounded-lg border border-amber-200 bg-amber-50/80 p-3 text-[11px] text-amber-950 space-y-1">
                 <div className="font-bold flex items-center gap-1.5">
                   <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-700" />
-                  {t(lang, 'نطاق الحماية المحلية على المتصفح', 'Portée de la sécurité locale')}
+                  {t(lang, 'استقلالية مستخدمي الحساب', 'Isolation des utilisateurs du compte')}
                 </div>
                 <p className="leading-relaxed text-amber-900">
                   {t(
                     lang,
-                    'تعمل الصلاحيات وكلمات السر محلياً لتنظيم أدوار البائعين ومنع التعديلات غير المصرح بها على جهاز الكاشير المشترك. يُنصح بتفعيل «طلب الدخول عند فتح التطبيق» وتغيير كلمة سر المدير الافتراضية فوراً.',
-                    'Les rôles et mots de passe fonctionnent localement pour séparer les tâches sur un poste partagé. Activez la connexion au démarrage et changez le mot de passe admin par défaut.'
+                    'المستخدمون المضافون هنا يعملون حصرياً داخل هذا الحساب المستقل ويمكنهم الدخول بالبريد الإلكتروني أو رقم الهاتف أو اسم المستخدم وفق صلاحياتهم المحددة.',
+                    'Les utilisateurs créés ici appartiennent exclusivement à ce compte isolé et peuvent se connecter par e-mail, téléphone ou identifiant.'
                   )}
                 </p>
               </div>
@@ -834,18 +1057,27 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
               <div className="divide-y divide-slate-100 border-t border-slate-200">
                 {users.map((u) => {
                   const isExpanded = expandedUserId === u.id;
-                  const activePermCount = Object.values(u.permissions ?? {}).filter(Boolean).length;
+                  const permKeys = Object.keys(PERMISSION_LABELS) as BooleanPermissionKey[];
+                  const activePermCount = permKeys.filter((k) => Boolean(u.permissions?.[k])).length;
+                  const maxDisc = getMaxDiscountPercent(u);
                   return (
                     <div key={u.id} className="py-2.5 text-xs space-y-2">
                       <div className="flex items-center justify-between gap-2">
                         <div>
                           <div className="font-semibold text-slate-900">{u.fullName}</div>
                           <div className="text-slate-500 font-mono text-[11px]">
-                            @{u.username} · {u.role} · {activePermCount}/12 {t(lang, 'صلاحية', 'perms')}
+                            @{u.username} · {u.role} · {activePermCount}/{permKeys.length}{' '}
+                            {t(lang, 'صلاحية', 'perms')} · {t(lang, `سقف خصم ${maxDisc}%`, `remise max ${maxDisc}%`)}
                           </div>
+                          {(u.email || u.phone) && (
+                            <div className="flex flex-wrap items-center gap-2.5 mt-0.5 text-[11px] font-mono text-teal-800">
+                              {u.email && <span>{u.email}</span>}
+                              {u.phone && <span dir="ltr">{u.phone}</span>}
+                            </div>
+                          )}
                         </div>
                         <div className="flex items-center gap-1.5">
-                          {u.username !== 'admin' && (
+                          {u.role !== 'admin' && (
                             <>
                               <button
                                 type="button"
@@ -871,21 +1103,41 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                         </div>
                       </div>
 
-                      {isExpanded && u.username !== 'admin' && (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
-                          {(Object.keys(PERMISSION_LABELS) as PermissionKey[]).map((key) => (
-                            <label
-                              key={key}
-                              className="flex items-center gap-2 text-[11px] text-slate-800 cursor-pointer hover:text-slate-950"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={Boolean(u.permissions?.[key])}
-                                onChange={() => handleToggleUserPermission(u, key)}
-                              />
-                              <span>{lang === 'ar' ? PERMISSION_LABELS[key].ar : PERMISSION_LABELS[key].fr}</span>
+                      {isExpanded && u.role !== 'admin' && (
+                        <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                            {permKeys.map((key) => (
+                              <label
+                                key={key}
+                                className="flex items-center gap-2 text-[11px] text-slate-800 cursor-pointer hover:text-slate-950"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(u.permissions?.[key])}
+                                  onChange={() => handleToggleUserPermission(u, key)}
+                                />
+                                <span>{lang === 'ar' ? PERMISSION_LABELS[key].ar : PERMISSION_LABELS[key].fr}</span>
+                              </label>
+                            ))}
+                          </div>
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-2">
+                            <label className="text-[11px] font-bold text-slate-800">
+                              {t(lang, 'سقف الخصم الأقصى المسموح (%)', 'Plafond maximal de remise (%)')}
                             </label>
-                          ))}
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="number"
+                                min={0}
+                                max={100}
+                                step={1}
+                                disabled={!u.permissions?.canGiveDiscount}
+                                value={u.permissions?.maxDiscountPercent ?? 0}
+                                onChange={(e) => handleUpdateMaxDiscount(u, Number(e.target.value))}
+                                className="w-20 rounded border border-slate-300 bg-white px-2 py-1 text-center font-mono text-xs font-bold disabled:bg-slate-200 disabled:text-slate-400"
+                              />
+                              <span className="font-mono font-bold text-slate-700">%</span>
+                            </div>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -899,7 +1151,7 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
             <div className="lg:col-span-8 border-[1.5px] border-slate-900 bg-white overflow-hidden">
               <div className="bg-[#0B274D] text-[#FDE68A] px-3 py-2 text-xs font-extrabold">
-                {t(lang, 'سجل التدقيق والعمليات (مع إمكانية استعادة العمليات الملغاة)', 'Journal d’audit & Restauration')}
+                {t(lang, 'سجل التدقيق والعمليات (مع إمكانية نسخ الفواتير الملغاة كفواتير جديدة)', 'Journal d’audit & Clonage des factures annulées')}
               </div>
               <div className="max-h-72 overflow-y-auto">
                 <table className="w-full border-collapse text-xs">
@@ -908,7 +1160,7 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                       <th className="border border-slate-900 px-2 py-1.5 text-center font-extrabold">{t(lang, 'التاريخ', 'Date')}</th>
                       <th className="border border-slate-900 px-2 py-1.5 text-center font-extrabold">{t(lang, 'المستخدم', 'Utilisateur')}</th>
                       <th className="border border-slate-900 px-2 py-1.5 text-center font-extrabold">{t(lang, 'التفاصيل', 'Détails')}</th>
-                      <th className="border border-slate-900 px-2 py-1.5 text-center font-extrabold w-[90px]">{t(lang, 'استعادة', 'Action')}</th>
+                      <th className="border border-slate-900 px-2 py-1.5 text-center font-extrabold w-[125px]">{t(lang, 'إجراء', 'Action')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -923,11 +1175,11 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                           {log.canRestore && !log.restored && log.entityType === 'saleInvoice' && (
                             <button
                               type="button"
-                              onClick={() => handleRestoreCancelled(log.entityId, log.id!)}
-                              className="inline-flex items-center gap-1 rounded border border-teal-700 bg-teal-50 px-2 py-0.5 text-[11px] font-bold text-teal-900 hover:bg-teal-100"
+                              onClick={() => handleCloneCancelled(log.entityId, log.id!)}
+                              className="inline-flex items-center gap-1 rounded border border-teal-700 bg-teal-50 px-2 py-0.5 text-[11px] font-bold text-teal-900 hover:bg-teal-100 whitespace-nowrap"
                             >
                               <RotateCcw className="h-3 w-3" />
-                              {t(lang, 'استعادة', 'Restaurer')}
+                              {t(lang, 'نسخ كفاتورة جديدة', 'Cloner')}
                             </button>
                           )}
                         </td>
@@ -2738,13 +2990,67 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
         </div>
       )}
 
-      {/* 12.5 BACKUP & RESTORE */}
+      {/* 12.5 BACKUP & RESTORE (External Folder via showDirectoryPicker + Daily Download Fallback + Default AES-256 Encryption) */}
       {subTab === 'backup' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
           <div className="lg:col-span-5 rounded-xl border border-slate-200 bg-white p-5 space-y-4 text-xs">
             <h3 className="text-sm font-bold text-slate-900">
-              {t(lang, 'إنشاء وتصدير نسخة احتياطية', 'Créer et exporter une sauvegarde')}
+              {t(lang, 'النسخ الاحتياطي الخارجي المشفر (AES-256)', 'Sauvegarde externe chiffrée (AES-256)')}
             </h3>
+
+            {/* External Backup Folder Connection (Chromium showDirectoryPicker) */}
+            <div className="rounded-lg border border-blue-200 bg-blue-50/70 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold text-blue-950 flex items-center gap-1.5">
+                  <FolderOpen className="h-4 w-4 text-blue-700 shrink-0" />
+                  {t(lang, 'مجلد النسخ الاحتياطي الخارجي', 'Dossier externe de sauvegarde')}
+                </span>
+                {externalFolderName && (
+                  <button
+                    type="button"
+                    onClick={handleDisconnectExternalFolder}
+                    className="inline-flex items-center gap-1 rounded border border-red-200 bg-white px-2 py-0.5 text-[10px] font-bold text-red-700 hover:bg-red-50"
+                  >
+                    <FolderX className="h-3 w-3" />
+                    {t(lang, 'فصل', 'Délier')}
+                  </button>
+                )}
+              </div>
+
+              {externalFolderName ? (
+                <div className="text-[11px] font-semibold text-emerald-800">
+                  {t(lang, `مرتبط بالمجلد: ${externalFolderName}`, `Lié au dossier : ${externalFolderName}`)}
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-700 leading-relaxed">
+                  {directoryPickerSupported
+                    ? t(
+                        lang,
+                        'اختر مجلداً على القرص الصلب لحفظ النسخ الاحتياطية خارج قاعدة المتصفح تلقائياً، وإلا سيُستخدم التنزيل اليومي كبديل.',
+                        'Sélectionnez un dossier local (Chromium) pour enregistrer automatiquement hors IndexedDB, sinon un téléchargement quotidien est utilisé.'
+                      )
+                    : t(
+                        lang,
+                        'متصفحك لا يدعم اختيار المجلد المباشر — سيتم تنزيل النسخ الاحتياطية تلقائياً كملفات على جهازك بدلاً من تخزينها داخل المتصفح.',
+                        'Votre navigateur ne supporte pas showDirectoryPicker — les sauvegardes sont téléchargées automatiquement hors navigateur.'
+                      )}
+                </p>
+              )}
+
+              {directoryPickerSupported && (
+                <button
+                  type="button"
+                  onClick={handlePickExternalBackupFolder}
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-[#0B274D] py-2 text-xs font-bold text-[#FDE68A] hover:bg-[#163d73]"
+                >
+                  <HardDrive className="h-3.5 w-3.5" />
+                  {externalFolderName
+                    ? t(lang, 'تغيير مجلد النسخ الاحتياطي الخارجي', 'Changer le dossier externe')
+                    : t(lang, 'ربط مجلد خارجي (showDirectoryPicker)', 'Choisir un dossier externe')}
+                </button>
+              )}
+            </div>
+
             <div>
               <label className="block font-medium text-slate-700 mb-1">
                 {t(lang, 'وصف النسخة (اختياري)', 'Libellé (optionnel)')}
@@ -2756,15 +3062,28 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                 className="w-full rounded-lg border border-slate-300 px-3 py-2"
               />
             </div>
-            <div>
-              <label className="block font-medium text-slate-700 mb-1">
-                {t(lang, 'كلمة التشفير AES-256 (اتركها فارغة لنسخة غير مشفرة)', 'Mot de passe de chiffrement AES-256 (optionnel)')}
+
+            <div className="space-y-1.5">
+              <label className="flex items-center justify-between font-medium text-slate-700">
+                <span className="flex items-center gap-1">
+                  <KeyRound className="h-3.5 w-3.5 text-teal-700" />
+                  {t(lang, 'كلمة التشفير AES-256', 'Mot de passe AES-256')}
+                </span>
+                {hasSessionBackupPassphrase && (
+                  <span className="text-[10px] font-bold text-emerald-700">
+                    {t(lang, 'مفتاح الجلسة جاهز في الذاكرة', 'Clé de session active')}
+                  </span>
+                )}
               </label>
               <input
                 type="password"
                 value={backupPassphrase}
                 onChange={(e) => setBackupPassphrase(e.target.value)}
-                placeholder="••••••••"
+                placeholder={
+                  hasSessionBackupPassphrase
+                    ? t(lang, 'اتركه فارغاً لاستعمال كلمة سر الجلسة الحالية', 'Vide = utilise le mot de passe de session')
+                    : '••••••••'
+                }
                 className="w-full rounded-lg border border-slate-300 px-3 py-2"
               />
             </div>
@@ -2772,27 +3091,31 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
             <div className="grid grid-cols-1 gap-2">
               <button
                 type="button"
-                onClick={() => handleCreateManualBackup(true, false)}
+                onClick={() => handleCreateManualBackup(false)}
                 className="inline-flex items-center justify-center gap-2 rounded-lg bg-teal-700 py-2.5 font-semibold text-white hover:bg-teal-800"
               >
                 <Download className="h-4 w-4" />
-                {t(lang, 'نسخ احتياطي يدوي وحفظ على الجهاز', 'Sauvegarde manuelle & Télécharger')}
+                {externalFolderName
+                  ? t(lang, 'نسخ احتياطي الآن إلى المجلد الخارجي', 'Sauvegarder vers le dossier externe')
+                  : t(lang, 'نسخ احتياطي مشفر وتنزيل الملف', 'Sauvegarde chiffrée & Télécharger')}
               </button>
-              <button
-                type="button"
-                onClick={() => handleCreateManualBackup(true, true)}
-                className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 py-2 font-medium text-slate-700 hover:bg-slate-50"
-              >
-                <HardDrive className="h-4 w-4" />
-                {t(lang, 'الحفظ في مجلد خارجي', 'Enregistrer dans un dossier externe')}
-              </button>
+              {externalFolderName && (
+                <button
+                  type="button"
+                  onClick={() => handleCreateManualBackup(true)}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 py-2 font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  <Download className="h-4 w-4" />
+                  {t(lang, 'تنزيل نسخة مباشرة كملف', 'Télécharger directement')}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={handleExportRawDb}
                 className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 py-2 font-medium text-slate-700 hover:bg-slate-50"
               >
                 <Database className="h-4 w-4" />
-                {t(lang, 'تصدير نسخة كاملة من قاعدة البيانات (JSON)', 'Exporter toute la base (JSON)')}
+                {t(lang, 'تصدير نسخة خام غير مشفرة (JSON)', 'Exporter brut non chiffré (JSON)')}
               </button>
             </div>
 
@@ -2835,13 +3158,13 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
               <p className="text-[11px] leading-relaxed">
                 {t(
                   lang,
-                  'النسخ التلقائية تُحفظ داخل قاعدة المتصفح (IndexedDB). لتجنب فقدان البيانات عند مسح بيانات المتصفح أو إخلائها تلقائياً (خصوصاً على iPhone / Safari)، قم بتحميل نسخة احتياطية خارجية دورياً.',
-                  'Les sauvegardes auto sont stockées localement (IndexedDB). Pour éviter toute perte si le navigateur efface les données (notamment iOS/Safari), téléchargez régulièrement une copie externe.'
+                  'لا يتم تخزين محتوى النسخ الاحتياطية داخل IndexedDB لتجنب تضخم القاعدة وفقدانها مع المتصفح؛ يُحفظ السجل الوصفي فقط بينما تُكتب الملفات في المجلد الخارجي أو تُنزّل يومياً.',
+                  'Les contenus complets ne sont plus stockés dans IndexedDB : seul le registre des métadonnées reste en base, les fichiers sont écrits dans le dossier externe ou téléchargés.'
                 )}
               </p>
               {settings.backupConfig.lastExternalExportAt && (
                 <div className="text-[11px] font-mono text-slate-700">
-                  {t(lang, 'آخر تصدير خارجي:', 'Dernier export externe :')}{' '}
+                  {t(lang, 'آخر حفظ خارجي:', 'Dernier export externe :')}{' '}
                   {formatDateTime(settings.backupConfig.lastExternalExportAt, lang)}
                 </div>
               )}
@@ -2850,7 +3173,7 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
             <div className="border-t border-slate-200 pt-4 space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <div className="font-semibold text-slate-900">
-                  {t(lang, 'النسخ الاحتياطي التلقائي المجدول', 'Sauvegarde automatique planifiée')}
+                  {t(lang, 'النسخ الاحتياطي التلقائي والتشفير', 'Sauvegarde auto & Chiffrement')}
                 </div>
                 <button
                   type="button"
@@ -2872,6 +3195,21 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                       (c) => ({ ...c, backupConfig: { ...c.backupConfig, autoBackupEnabled: e.target.checked } }),
                       currentUser,
                       'تبديل النسخ التلقائي'
+                    )
+                  }
+                />
+              </label>
+              <label className="flex items-center justify-between cursor-pointer">
+                <span>{t(lang, 'تشفير النسخ الاحتياطية AES-256 افتراضياً', 'Chiffrer les sauvegardes par défaut (AES-256)')}</span>
+                <input
+                  type="checkbox"
+                  checked={settings.backupConfig.encryptBackupsDefault}
+                  onChange={(e) =>
+                    currentUser &&
+                    updateSettingsSection(
+                      (c) => ({ ...c, backupConfig: { ...c.backupConfig, encryptBackupsDefault: e.target.checked } }),
+                      currentUser,
+                      'تبديل التشفير الافتراضي للنسخ الاحتياطية'
                     )
                   }
                 />
@@ -2908,7 +3246,7 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-600 mb-1">{t(lang, 'عدد النسخ المحتفظ بها', 'Max conservées')}</label>
+                  <label className="block text-slate-600 mb-1">{t(lang, 'عدد السجلات المحتفظ بها', 'Max conservées')}</label>
                   <input
                     type="number"
                     min="1"
@@ -2925,7 +3263,7 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                           },
                         }),
                         currentUser,
-                        'تعديل عدد النسخ المحتفظ بها'
+                        'تعديل عدد سجلات النسخ المحتفظ بها'
                       )
                     }
                     className="w-full rounded border border-slate-300 px-2 py-1 font-mono"
@@ -2941,20 +3279,24 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                 className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-red-200 bg-red-50 py-2 text-xs font-semibold text-red-700 hover:bg-red-100"
               >
                 <Trash2 className="h-3.5 w-3.5" />
-                {t(lang, 'تصفير البيانات التجريبية والبدء الفعلي من الصفر', 'Réinitialiser pour démarrer à zéro')}
+                {t(lang, 'تصفير البيانات والبدء الفعلي من الصفر (مع نسخة أمان تلقائية)', 'Réinitialiser à zéro (avec sauvegarde auto)')}
               </button>
             </div>
           </div>
 
-          {/* Restore & Backup History */}
+          {/* Restore & Backup History (Metadata Only) */}
           <div className="lg:col-span-7 rounded-xl border border-slate-200 bg-white p-5 space-y-4 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
-                  {t(lang, 'استعادة نسخة احتياطية وقائمة النسخ السابقة', 'Restauration & Historique des sauvegardes')}
+                  {t(lang, 'استعادة نسخة احتياطية وسجل النسخ الخارجية', 'Restauration & Journal des sauvegardes')}
                 </h3>
                 <p className="text-slate-500">
-                  {t(lang, 'يتم التحقق تلقائياً من سلامة الملف (SHA-256) قبل الاستعادة', 'Vérification d’intégrité SHA-256 avant restauration')}
+                  {t(
+                    lang,
+                    'يتم تلقائياً إنشاء نسخة أمان والتحقق من سلامة الملف (SHA-256) قبل الاستعادة',
+                    'Sauvegarde de sécurité automatique et vérification SHA-256 avant toute restauration'
+                  )}
                 </p>
               </div>
               <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-800">
@@ -2972,7 +3314,11 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                 type="password"
                 value={restorePassphrase}
                 onChange={(e) => setRestorePassphrase(e.target.value)}
-                placeholder="••••••••"
+                placeholder={
+                  hasSessionBackupPassphrase
+                    ? t(lang, 'اتركه فارغاً لاستعمال كلمة سر الجلسة', 'Vide = mot de passe de session')
+                    : '••••••••'
+                }
                 className="w-full max-w-xs rounded-lg border border-slate-300 px-3 py-1.5"
               />
             </div>
@@ -2983,53 +3329,59 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
                   <thead>
                     <tr className="bg-[#FCE08B] text-slate-950">
                       <th className="border border-slate-900 px-2.5 py-2 text-center font-extrabold">{t(lang, 'التاريخ والوقت', 'Date')}</th>
-                      <th className="border border-slate-900 px-2.5 py-2 text-center font-extrabold">{t(lang, 'الوصف / التشفير', 'Libellé')}</th>
+                      <th className="border border-slate-900 px-2.5 py-2 text-center font-extrabold">{t(lang, 'الوصف / الموقع', 'Libellé / Emplacement')}</th>
                       <th className="border border-slate-900 px-2.5 py-2 text-center font-extrabold">{t(lang, 'الحجم', 'Taille')}</th>
-                      <th className="border border-slate-900 px-2.5 py-2 text-center font-extrabold">{t(lang, 'إجراءات', 'Actions')}</th>
+                      <th className="border border-slate-900 px-2.5 py-2 text-center font-extrabold">{t(lang, 'استعادة', 'Action')}</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {backups.map((b) => (
-                      <tr key={b.id} className="hover:bg-amber-50/50">
-                        <td className="border border-slate-800/80 px-2.5 py-1.5 text-center font-mono text-[11px] tabular-nums text-slate-700">{formatDateTime(b.date, lang)}</td>
-                        <td className="border border-slate-800/80 px-2.5 py-1.5">
-                          <div className="font-bold text-slate-950">{b.label}</div>
-                          <div className="font-mono text-[10px] text-slate-500">
-                            {b.encrypted ? 'AES-256-GCM' : 'JSON'} · SHA256: {b.checksum.slice(0, 12)}...
-                          </div>
-                        </td>
-                        <td className="border border-slate-800/80 px-2.5 py-1.5 text-center font-mono tabular-nums">
-                          {(b.sizeBytes / 1024).toFixed(1)} KB
-                        </td>
-                        <td className="border border-slate-800/80 px-2 py-1.5 text-center">
-                          <div className="flex items-center justify-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                downloadTextFile(
-                                  b.payloadJson,
-                                  `backup_${b.date.slice(0, 10)}_${b.id}.json`
-                                )
-                              }
-                              className="rounded border border-slate-800 bg-white px-2 py-0.5 text-[11px] font-bold hover:bg-[#FCE08B]"
-                            >
-                              {t(lang, 'تحميل', 'Télécharger')}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleRestoreFromRecord(b.payloadJson)}
-                              className="rounded bg-teal-700 px-2.5 py-0.5 text-[11px] font-bold text-white hover:bg-teal-800"
-                            >
-                              {t(lang, 'استعادة', 'Restaurer')}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    {backups.map((b) => {
+                      const canDirectRestore =
+                        (b.storageLocation === 'directory' && Boolean(b.fileName)) || b.hasLegacyPayload;
+                      return (
+                        <tr key={b.id} className="hover:bg-amber-50/50">
+                          <td className="border border-slate-800/80 px-2.5 py-1.5 text-center font-mono text-[11px] tabular-nums text-slate-700">
+                            {formatDateTime(b.date, lang)}
+                          </td>
+                          <td className="border border-slate-800/80 px-2.5 py-1.5">
+                            <div className="font-bold text-slate-950">{b.label}</div>
+                            <div className="font-mono text-[10px] text-slate-500">
+                              {b.encrypted ? 'AES-256-GCM' : 'JSON'} ·{' '}
+                              {b.storageLocation === 'directory'
+                                ? `${t(lang, 'مجلد:', 'Dossier:')} ${b.folderName || 'خارجي'}`
+                                : b.storageLocation === 'download'
+                                  ? t(lang, 'ملف منزّل على الجهاز', 'Téléchargé')
+                                  : b.hasLegacyPayload
+                                    ? t(lang, 'نسخة قديمة داخلية', 'Ancienne copie interne')
+                                    : t(lang, 'سجل وصفي', 'Métadonnées')}
+                              {' · '}SHA256: {b.checksum.slice(0, 10)}...
+                            </div>
+                          </td>
+                          <td className="border border-slate-800/80 px-2.5 py-1.5 text-center font-mono tabular-nums">
+                            {(b.sizeBytes / 1024).toFixed(1)} KB
+                          </td>
+                          <td className="border border-slate-800/80 px-2 py-1.5 text-center">
+                            {canDirectRestore ? (
+                              <button
+                                type="button"
+                                onClick={() => handleRestoreFromHistoryEntry(b)}
+                                className="rounded bg-teal-700 px-2.5 py-0.5 text-[11px] font-bold text-white hover:bg-teal-800"
+                              >
+                                {t(lang, 'استعادة', 'Restaurer')}
+                              </button>
+                            ) : (
+                              <span className="text-[10px] font-semibold text-slate-500">
+                                {t(lang, 'ملف خارجي', 'Fichier externe')}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {backups.length === 0 && (
                       <tr>
                         <td colSpan={4} className="border border-slate-800/80 p-8 text-center text-slate-400">
-                          {t(lang, 'لم يتم حفظ نسخ احتياطية داخلية بعد — اضغط "نسخ احتياطي يدوي"', 'Aucune sauvegarde locale enregistrée')}
+                          {t(lang, 'لا توجد نسخ احتياطية مسجلة بعد', 'Aucune sauvegarde enregistrée')}
                         </td>
                       </tr>
                     )}

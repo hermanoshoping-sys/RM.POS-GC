@@ -16,7 +16,13 @@ import {
   X,
 } from 'lucide-react';
 import { db } from '../db/database';
-import { logAudit, round2, updateProductWithPriceHistory } from '../db/operations';
+import {
+  createProductWithOpeningStock,
+  importProductsWithOpeningStock,
+  logAudit,
+  round2,
+  updateProductWithPriceHistory,
+} from '../db/operations';
 import { useApp } from '../context/AppContext';
 import { Product } from '../types';
 import { formatDateTime, formatMoney, PRODUCT_UNITS, t } from '../i18n/translations';
@@ -311,8 +317,8 @@ export const ProductsModule: React.FC = () => {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.name.trim()) return;
-    const payload = {
+    if (!form.name.trim() || !currentUser) return;
+    const basePayload = {
       name: form.name.trim(),
       sku: form.sku.trim(),
       barcode: form.barcode.trim(),
@@ -322,7 +328,6 @@ export const ProductsModule: React.FC = () => {
       salePrice: Number(form.salePrice) || 0,
       wholesalePrice: Number(form.wholesalePrice) || Number(form.salePrice) || 0,
       secondSalePrice: Number(form.secondSalePrice) || Number(form.salePrice) || 0,
-      quantity: Number(form.quantity) || 0,
       minStock: Number(form.minStock) || 0,
       expiryDate: form.expiryDate || undefined,
       lotNumber: form.lotNumber.trim() || undefined,
@@ -331,22 +336,25 @@ export const ProductsModule: React.FC = () => {
       imageUrl: form.imageUrl || undefined,
     };
 
-    if (editing?.id && currentUser) {
-      await updateProductWithPriceHistory(editing.id, payload, currentUser);
-      notify(t(lang, 'تم تحديث المنتج بنجاح', 'Produit mis à jour'));
-    } else {
-      const now = new Date().toISOString();
-      const id = await db.products.add({
-        ...payload,
-        createdAt: now,
-        updatedAt: now,
-      });
-      if (currentUser) {
-        await logAudit(currentUser, 'PRODUCT_CREATED', 'product', id, `إضافة منتج: ${payload.name}`);
+    try {
+      if (editing?.id) {
+        // Quantity is read-only during edit — never overwrite stock without a stock movement
+        await updateProductWithPriceHistory(editing.id, basePayload, currentUser);
+        notify(t(lang, 'تم تحديث المنتج بنجاح', 'Produit mis à jour'));
+      } else {
+        await createProductWithOpeningStock(
+          {
+            ...basePayload,
+            quantity: Math.max(0, Number(form.quantity) || 0),
+          },
+          currentUser
+        );
+        notify(t(lang, 'تمت إضافة المنتج وتسجيل الرصيد الافتتاحي بنجاح', 'Produit ajouté avec stock initial'));
       }
-      notify(t(lang, 'تمت إضافة المنتج بنجاح', 'Produit ajouté'));
+      setShowForm(false);
+    } catch (err) {
+      notify((err as Error).message, 'error');
     }
-    setShowForm(false);
   };
 
   const handleDelete = (p: Product) => {
@@ -527,17 +535,16 @@ export const ProductsModule: React.FC = () => {
 
   const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || !currentUser) return;
     try {
       const rows = await parseExcelFileToJson(file);
-      const now = new Date().toISOString();
-      let imported = 0;
+      const batch: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>[] = [];
       for (const r of rows) {
         const name = String(r.name ?? r['اسم المنتج'] ?? r['Produit'] ?? '').trim();
         if (!name) continue;
-        await db.products.add({
+        batch.push({
           name,
-          sku: String(r.sku ?? r.SKU ?? `IMP-${Date.now().toString().slice(-4)}-${imported}`),
+          sku: String(r.sku ?? r.SKU ?? `IMP-${Date.now().toString().slice(-4)}-${batch.length}`),
           barcode: String(
             r.barcode ??
               r['الباركود'] ??
@@ -549,27 +556,22 @@ export const ProductsModule: React.FC = () => {
           salePrice: Number(r.salePrice ?? r['سعر البيع'] ?? 0) || 0,
           wholesalePrice: Number(r.wholesalePrice ?? r['سعر الجملة'] ?? r.salePrice ?? 0) || 0,
           secondSalePrice: Number(r.secondSalePrice ?? r.salePrice ?? 0) || 0,
-          quantity: Number(r.quantity ?? r['الكمية'] ?? 0) || 0,
+          quantity: Math.max(0, Number(r.quantity ?? r['الكمية'] ?? 0) || 0),
           minStock: Number(r.minStock ?? r['الحد الأدنى'] ?? 5) || 5,
           expiryDate: String(r.expiryDate ?? '') || undefined,
           lotNumber: String(r.lotNumber ?? '') || undefined,
           isActive: true,
           isWeighted: String(r.isWeighted ?? '').toUpperCase() === 'YES',
-          createdAt: now,
-          updatedAt: now,
         });
-        imported += 1;
       }
-      if (currentUser && imported > 0) {
-        await logAudit(
-          currentUser,
-          'PRODUCTS_IMPORTED',
-          'product',
-          'batch',
-          `استيراد ${imported} منتج من ملف Excel`
-        );
-      }
-      notify(t(lang, `تم استيراد ${imported} منتج بنجاح`, `${imported} produits importés`));
+      const imported = await importProductsWithOpeningStock(batch, currentUser);
+      notify(
+        t(
+          lang,
+          `تم استيراد ${imported} منتجاً مع تسجيل حركات الرصيد الافتتاحي`,
+          `${imported} produits importés avec mouvements de stock initial`
+        )
+      );
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Excel import error', 'error');
     } finally {
@@ -1379,15 +1381,35 @@ export const ProductsModule: React.FC = () => {
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    {t(lang, 'الكمية الحالية', 'Qté actuelle')}
+                    {editing
+                      ? t(lang, 'الكمية الحالية (للقراءة فقط)', 'Qté actuelle (lecture seule)')
+                      : t(lang, 'الرصيد الافتتاحي للمخزون', 'Stock initial (ouverture)')}
                   </label>
                   <input
                     type="number"
                     step="0.01"
+                    min="0"
+                    readOnly={Boolean(editing)}
+                    disabled={Boolean(editing)}
                     value={form.quantity}
-                    onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })}
-                    className="w-full rounded-lg border border-slate-300 px-2.5 py-1.5 text-sm font-mono"
+                    onChange={(e) => {
+                      if (!editing) setForm({ ...form, quantity: Number(e.target.value) });
+                    }}
+                    className={`w-full rounded-lg border px-2.5 py-1.5 text-sm font-mono ${
+                      editing
+                        ? 'border-slate-200 bg-slate-100 text-slate-500 cursor-not-allowed'
+                        : 'border-slate-300 bg-white text-slate-900'
+                    }`}
                   />
+                  {editing && (
+                    <p className="mt-0.5 text-[10px] text-amber-700">
+                      {t(
+                        lang,
+                        'لتعديل المخزون استعمل الجرد أو فواتير الشراء.',
+                        'Modifiez le stock via Inventaire ou Achats.'
+                      )}
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">

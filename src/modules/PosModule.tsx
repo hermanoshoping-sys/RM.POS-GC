@@ -9,15 +9,18 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  Copy,
   CreditCard,
   Download,
   Edit2,
   Eye,
   FileDown,
   Inbox,
+  Lock,
   Package,
   PauseCircle,
   Percent,
+  PlayCircle,
   Plus,
   Printer,
   ReceiptText,
@@ -33,6 +36,7 @@ import {
 import { db } from '../db/database';
 import {
   cancelSaleInvoice,
+  cloneSaleInvoiceAsNew,
   createSaleInvoice,
   createSaleReturn,
   logAudit,
@@ -67,6 +71,8 @@ import {
   toSaleReturnItems,
 } from '../utils/returns';
 import { openCashDrawer } from '../utils/cashDrawer';
+import { getMaxDiscountPercent, hasPermission } from '../utils/permissions';
+import { CashSessionModal } from '../components/CashSessionModal';
 
 type KeypadTarget = 'qty' | 'paid' | 'discount' | 'price';
 
@@ -99,6 +105,15 @@ export const PosModule: React.FC = () => {
   const heldCarts = useLiveQuery(() => db.heldCarts.orderBy('createdAt').reverse().toArray(), []) ?? [];
   const saleInvoices = useLiveQuery(() => db.saleInvoices.orderBy('date').reverse().toArray(), []) ?? [];
   const saleReturns = useLiveQuery(() => db.saleReturns.toArray(), []) ?? [];
+  const activeCashSession = useLiveQuery(
+    () => db.cashSessions.where('status').equals('open').first(),
+    []
+  );
+
+  const canOverridePrice = hasPermission(currentUser, 'canOverridePrice');
+  const canGiveDiscount = hasPermission(currentUser, 'canGiveDiscount');
+  const maxDiscountPct = getMaxDiscountPercent(currentUser);
+  const canCloneCancelled = hasPermission(currentUser, 'canRestoreCancelled');
 
   // POS Cart & Terminal State
   const [barcodeInput, setBarcodeInput] = useState('');
@@ -107,6 +122,7 @@ export const PosModule: React.FC = () => {
   const [showCameraScanner, setShowCameraScanner] = useState(false);
   const [showCalculator, setShowCalculator] = useState(false);
   const [showExtrasModal, setShowExtrasModal] = useState(false);
+  const [showShiftModal, setShowShiftModal] = useState(false);
   const [showDrawerReasonModal, setShowDrawerReasonModal] = useState(false);
   const [drawerReason, setDrawerReason] = useState('');
   const [openingDrawer, setOpeningDrawer] = useState(false);
@@ -362,7 +378,57 @@ export const PosModule: React.FC = () => {
     }
   };
 
+  const checkDiscountAllowed = (type: 'fixed' | 'percent', val: number): boolean => {
+    const cleanVal = Math.max(0, val);
+    if (cleanVal === 0) return true;
+    if (!canGiveDiscount) {
+      notify(t(lang, 'ليس لديك صلاحية منح الخصم', 'Permission de remise refusée'), 'error');
+      return false;
+    }
+    if (type === 'percent' && cleanVal > maxDiscountPct + 0.0001) {
+      notify(
+        t(
+          lang,
+          `تجاوزت سقف الخصم المسموح به (${maxDiscountPct}%)`,
+          `Remise max autorisée dépassée (${maxDiscountPct}%)`
+        ),
+        'error'
+      );
+      return false;
+    }
+    const gross = round2(cart.reduce((s, c) => s + c.quantity * c.unitPrice, 0));
+    const lineDiscs = round2(cart.reduce((s, c) => s + (c.discount || 0), 0));
+    const currentSub = round2(cart.reduce((s, c) => s + c.total, 0));
+    if (gross > 0) {
+      const invDisc =
+        type === 'percent'
+          ? round2((currentSub * Math.min(100, cleanVal)) / 100)
+          : round2(Math.min(currentSub, cleanVal));
+      const effectivePct = ((lineDiscs + invDisc) / gross) * 100;
+      if (effectivePct > maxDiscountPct + 0.01) {
+        notify(
+          t(
+            lang,
+            `إجمالي الخصم (${effectivePct.toFixed(1)}%) يتجاوز سقفك المسموح (${maxDiscountPct}%)`,
+            `La remise totale (${effectivePct.toFixed(1)}%) dépasse votre plafond (${maxDiscountPct}%)`
+          ),
+          'error'
+        );
+        return false;
+      }
+    }
+    return true;
+  };
+
   const updateCartItem = (productId: number, patch: Partial<SaleInvoiceItem>) => {
+    if (patch.unitPrice !== undefined && !canOverridePrice) {
+      notify(t(lang, 'ليس لديك صلاحية تعديل سعر البيع', 'Permission de modifier le prix refusée'), 'error');
+      return;
+    }
+    if (patch.discount !== undefined && patch.discount > 0 && !canGiveDiscount) {
+      notify(t(lang, 'ليس لديك صلاحية منح الخصم', 'Permission de remise refusée'), 'error');
+      return;
+    }
     const prod = products.find((p) => p.id === productId);
     setCart((prev) =>
       prev
@@ -409,6 +475,19 @@ export const PosModule: React.FC = () => {
 
   // Numeric Keypad Handler
   const handleKeypadPress = (key: string) => {
+    if (keypadTarget === 'price' && !canOverridePrice) {
+      notify(t(lang, 'ليس لديك صلاحية تعديل السعر', 'Permission de modifier le prix refusée'), 'error');
+      setKeypadTarget('qty');
+      setKeypadBuffer('');
+      return;
+    }
+    if (keypadTarget === 'discount' && !canGiveDiscount) {
+      notify(t(lang, 'ليس لديك صلاحية منح الخصم', 'Permission de remise refusée'), 'error');
+      setKeypadTarget('qty');
+      setKeypadBuffer('');
+      return;
+    }
+
     if (key === 'CL') {
       setKeypadBuffer('');
       if (keypadTarget === 'paid') {
@@ -426,23 +505,32 @@ export const PosModule: React.FC = () => {
 
     const nextBuf =
       keypadBuffer === '' && normalizedKey === '.' ? '0.' : keypadBuffer + normalizedKey;
-    setKeypadBuffer(nextBuf);
 
     const parsed = parseFloat(nextBuf);
-    if (Number.isNaN(parsed)) return;
+    if (Number.isNaN(parsed)) {
+      setKeypadBuffer(nextBuf);
+      return;
+    }
 
     if (keypadTarget === 'paid') {
+      setKeypadBuffer(nextBuf);
       setPaymentMode('single');
       if (singleMethod === 'credit') setSingleMethod('cash');
       setPaidInput(nextBuf);
     } else if (keypadTarget === 'discount') {
-      setDiscountValue(Math.max(0, parsed));
+      const candidate = Math.max(0, parsed);
+      if (!checkDiscountAllowed(discountType, candidate)) {
+        return;
+      }
+      setKeypadBuffer(nextBuf);
+      setDiscountValue(candidate);
     } else {
       const targetId = selectedProductId ?? cart[cart.length - 1]?.productId;
       if (!targetId) {
         notify(t(lang, 'اختر منتجاً من الفاتورة أولاً', 'Sélectionnez une ligne d’abord'), 'warning');
         return;
       }
+      setKeypadBuffer(nextBuf);
       setSelectedProductId(targetId);
       if (keypadTarget === 'qty') {
         if (parsed > 0) updateCartItem(targetId, { quantity: parsed });
@@ -752,6 +840,22 @@ export const PosModule: React.FC = () => {
     }
   };
 
+  const handleCloneCancelledSale = async (inv: SaleInvoice) => {
+    if (!currentUser || !inv.id) return;
+    try {
+      const created = await cloneSaleInvoiceAsNew(inv.id, currentUser);
+      notify(
+        t(
+          lang,
+          `تم نسخ الفاتورة الملغاة كفاتورة جديدة رقم ${created.invoiceNumber}`,
+          `Facture dupliquée sous le n° ${created.invoiceNumber}`
+        )
+      );
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
   const exportSalesExcel = () => {
     exportRowsToExcel(
       filteredInvoices.map((inv) => ({
@@ -883,6 +987,27 @@ export const PosModule: React.FC = () => {
           <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
             {activeTab === 'pos' && (
               <>
+                <button
+                  type="button"
+                  onClick={() => setShowShiftModal(true)}
+                  title={
+                    activeCashSession
+                      ? t(lang, `الوردية #${activeCashSession.id} مفتوحة — انقر للجرد والإغلاق`, `Session #${activeCashSession.id} ouverte — Clôturer`)
+                      : t(lang, 'فتح وردية صندوق جديدة', 'Ouvrir une session de caisse')
+                  }
+                  className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border-2 border-slate-900 px-2.5 py-1.5 text-xs font-extrabold shadow-sm active:scale-[0.98] ${
+                    activeCashSession
+                      ? 'bg-emerald-700 text-white hover:bg-emerald-800'
+                      : 'bg-white text-slate-950 hover:bg-amber-50'
+                  }`}
+                >
+                  <PlayCircle className="h-4 w-4 shrink-0" />
+                  <span className="hidden sm:inline">
+                    {activeCashSession
+                      ? t(lang, `الوردية #${activeCashSession.id}`, `Session #${activeCashSession.id}`)
+                      : t(lang, 'فتح وردية', 'Ouvrir caisse')}
+                  </span>
+                </button>
                 <button
                   type="button"
                   onClick={() => setShowCameraScanner(true)}
@@ -1412,7 +1537,7 @@ export const PosModule: React.FC = () => {
               {/* Numeric Keypad (3x4 grid: 1-9, CL, 0, ,) */}
               <div className="sm:col-span-6 flex flex-col gap-1">
                 {/* Compact Target Mode Strip */}
-                <div className="grid grid-cols-3 gap-0.5 rounded-md border border-slate-800 bg-slate-100 p-0.5 text-[10px] font-bold">
+                <div className="grid grid-cols-4 gap-0.5 rounded-md border border-slate-800 bg-slate-100 p-0.5 text-[10px] font-bold">
                   <button
                     type="button"
                     onClick={() => {
@@ -1443,17 +1568,51 @@ export const PosModule: React.FC = () => {
                   </button>
                   <button
                     type="button"
+                    disabled={!canOverridePrice}
+                    title={
+                      canOverridePrice
+                        ? t(lang, 'تعديل سعر السطر المحدد', 'Modifier le prix unitaire')
+                        : t(lang, 'تعديل السعر غير مسموح لصلاحيتك', 'Modification prix non autorisée')
+                    }
                     onClick={() => {
+                      if (!canOverridePrice) return;
+                      setKeypadTarget('price');
+                      setKeypadBuffer('');
+                    }}
+                    className={`inline-flex items-center justify-center gap-0.5 rounded py-1 ${
+                      !canOverridePrice
+                        ? 'cursor-not-allowed bg-slate-200 text-slate-400'
+                        : keypadTarget === 'price'
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-700 hover:bg-white'
+                    }`}
+                  >
+                    {!canOverridePrice && <Lock className="h-2.5 w-2.5 shrink-0" />}
+                    <span>{t(lang, 'السعر', 'Prix')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canGiveDiscount}
+                    title={
+                      canGiveDiscount
+                        ? t(lang, `خصم الفاتورة (الحد الأقصى ${maxDiscountPct}%)`, `Remise (max ${maxDiscountPct}%)`)
+                        : t(lang, 'الخصم غير مسموح لصلاحيتك', 'Remise non autorisée')
+                    }
+                    onClick={() => {
+                      if (!canGiveDiscount) return;
                       setKeypadTarget('discount');
                       setKeypadBuffer('');
                     }}
-                    className={`rounded py-1 ${
-                      keypadTarget === 'discount'
-                        ? 'bg-slate-900 text-white'
-                        : 'text-slate-700 hover:bg-white'
+                    className={`inline-flex items-center justify-center gap-0.5 rounded py-1 ${
+                      !canGiveDiscount
+                        ? 'cursor-not-allowed bg-slate-200 text-slate-400'
+                        : keypadTarget === 'discount'
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-700 hover:bg-white'
                     }`}
                   >
-                    {t(lang, 'خصم', 'Remise')}
+                    {!canGiveDiscount && <Lock className="h-2.5 w-2.5 shrink-0" />}
+                    <span>{t(lang, 'خصم', 'Remise')}</span>
                   </button>
                 </div>
 
@@ -1861,6 +2020,17 @@ export const PosModule: React.FC = () => {
                               <Ban className="h-3.5 w-3.5" />
                             </button>
                           )}
+                          {inv.status === 'cancelled' && canCloneCancelled && (
+                            <button
+                              type="button"
+                              onClick={() => handleCloneCancelledSale(inv)}
+                              title={t(lang, 'نسخ كفاتورة جديدة', 'Dupliquer en nouvelle facture')}
+                              className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-bold text-teal-700 hover:bg-teal-50"
+                            >
+                              <Copy className="h-3.5 w-3.5" />
+                              <span className="hidden sm:inline">{t(lang, 'نسخ كجديدة', 'Dupliquer')}</span>
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -1986,14 +2156,25 @@ export const PosModule: React.FC = () => {
 
             {/* Discount */}
             <div className="space-y-1.5">
-              <label className="block font-semibold text-slate-700">
-                {t(lang, 'خصم الفاتورة:', 'Remise globale :')}
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="block font-semibold text-slate-700">
+                  {t(lang, 'خصم الفاتورة:', 'Remise globale :')}
+                </label>
+                <span className="text-[11px] font-semibold text-slate-500">
+                  {canGiveDiscount
+                    ? t(lang, `الحد الأقصى: ${maxDiscountPct}%`, `Max autorisé : ${maxDiscountPct}%`)
+                    : t(lang, 'غير مسموح بصلاحيتك', 'Non autorisé')}
+                </span>
+              </div>
               <div className="flex items-center gap-2">
                 <select
+                  disabled={!canGiveDiscount}
                   value={discountType}
-                  onChange={(e) => setDiscountType(e.target.value as 'fixed' | 'percent')}
-                  className="rounded-lg border border-slate-300 px-2.5 py-2"
+                  onChange={(e) => {
+                    setDiscountType(e.target.value as 'fixed' | 'percent');
+                    setDiscountValue(0);
+                  }}
+                  className="rounded-lg border border-slate-300 px-2.5 py-2 disabled:bg-slate-100 disabled:text-slate-400"
                 >
                   <option value="fixed">{cur}</option>
                   <option value="percent">%</option>
@@ -2002,9 +2183,15 @@ export const PosModule: React.FC = () => {
                   type="number"
                   min="0"
                   step="0.5"
+                  disabled={!canGiveDiscount}
                   value={discountValue}
-                  onChange={(e) => setDiscountValue(Number(e.target.value))}
-                  className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-end font-mono"
+                  onChange={(e) => {
+                    const nextVal = Math.max(0, Number(e.target.value) || 0);
+                    if (checkDiscountAllowed(discountType, nextVal)) {
+                      setDiscountValue(nextVal);
+                    }
+                  }}
+                  className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-end font-mono disabled:bg-slate-100 disabled:text-slate-400"
                 />
               </div>
             </div>
@@ -2495,8 +2682,10 @@ export const PosModule: React.FC = () => {
                     type="number"
                     min="0"
                     step="0.01"
+                    disabled={!canOverridePrice}
                     value={it.unitPrice}
                     onChange={(e) => {
+                      if (!canOverridePrice) return;
                       const p = Number(e.target.value) || 0;
                       setEditItems((prev) =>
                         prev.map((x, i) =>
@@ -2504,7 +2693,7 @@ export const PosModule: React.FC = () => {
                         )
                       );
                     }}
-                    className="w-24 rounded border border-slate-300 px-2 py-1 font-mono text-end"
+                    className="w-24 rounded border border-slate-300 px-2 py-1 font-mono text-end disabled:bg-slate-100 disabled:text-slate-400"
                   />
                 </div>
               ))}
@@ -2515,9 +2704,10 @@ export const PosModule: React.FC = () => {
                 type="number"
                 min="0"
                 step="0.5"
+                disabled={!canGiveDiscount}
                 value={editDiscount}
                 onChange={(e) => setEditDiscount(Number(e.target.value))}
-                className="w-28 rounded border border-slate-300 px-2 py-1 font-mono text-end"
+                className="w-28 rounded border border-slate-300 px-2 py-1 font-mono text-end disabled:bg-slate-100 disabled:text-slate-400"
               />
             </div>
             <div className="flex justify-end gap-2">
@@ -2622,6 +2812,13 @@ export const PosModule: React.FC = () => {
           </form>
         </div>
       )}
+
+      {/* Cash Session / Shift Count Modal */}
+      <CashSessionModal
+        open={showShiftModal}
+        activeSession={activeCashSession}
+        onClose={() => setShowShiftModal(false)}
+      />
     </div>
   );
 };
